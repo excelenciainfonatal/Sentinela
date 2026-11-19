@@ -1,0 +1,174 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- GLOBAL HARDENED HELPERS ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // --- ENTITY VALIDATION HELPERS ---
+    function isValidUserProfile(data) {
+      return data.userId is string &&
+             data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() <= 120 &&
+             (!('email' in data) || (data.email is string && data.email.size() <= 254)) &&
+             data.autoSyncEnabled is bool &&
+             data.totalSyncedScans is int &&
+             data.totalSyncedScans >= 0 && data.totalSyncedScans <= 1000000;
+    }
+
+    function isValidWhitelistedApp(data) {
+      return data.packageName is string && data.packageName.size() >= 1 && data.packageName.size() <= 200 &&
+             data.appName is string && data.appName.size() >= 1 && data.appName.size() <= 120 &&
+             data.sha256Fingerprint is string && data.sha256Fingerprint.size() <= 128 &&
+             data.reason is string && data.reason.size() <= 240 &&
+             data.addedAtMillis is int && data.addedAtMillis >= 0;
+    }
+
+    function isValidCertificateRule(data) {
+      return data.sha256Fingerprint is string && data.sha256Fingerprint.size() >= 1 && data.sha256Fingerprint.size() <= 128 &&
+             data.label is string && data.label.size() >= 1 && data.label.size() <= 120 &&
+             data.trustStatus in ['TRUSTED', 'BLOCKED'] &&
+             data.packageNameHint is string && data.packageNameHint.size() <= 200 &&
+             data.notes is string && data.notes.size() <= 240;
+    }
+
+    function isValidScanRecord(data) {
+      return data.packageName is string && data.packageName.size() >= 1 && data.packageName.size() <= 200 &&
+             data.appName is string && data.appName.size() >= 1 && data.appName.size() <= 120 &&
+             data.versionName is string && data.versionName.size() <= 64 &&
+             data.scanSource in ['GATEKEEPER_APK', 'VARREDURA_DISPOSITIVO', 'TEMPO_REAL'] &&
+             data.verdict in ['SEGURO', 'SUSPEITO', 'BLOQUEADO'] &&
+             data.riskScore is int && data.riskScore >= 0 && data.riskScore <= 100 &&
+             data.sha256Fingerprint is string && data.sha256Fingerprint.size() <= 128 &&
+             data.findingsSummary is string && data.findingsSummary.size() <= 1000 &&
+             data.scannedAtMillis is int && data.scannedAtMillis >= 0;
+    }
+
+    // --- USER-SCOPED COLLECTIONS ---
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'autoSyncEnabled', 'totalSyncedScans', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'email', 'autoSyncEnabled', 'totalSyncedScans', 'createdAt', 'updatedAt']) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'autoSyncEnabled', 'totalSyncedScans', 'updatedAt']);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      // Subcollection: Whitelist
+      match /whitelist/{itemId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(itemId);
+        allow list: if isOwner(userId) && isValidId(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(itemId) &&
+                         incoming().keys().hasAll(['packageName', 'appName', 'sha256Fingerprint', 'reason', 'addedAtMillis', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['packageName', 'appName', 'sha256Fingerprint', 'reason', 'addedAtMillis', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidWhitelistedApp(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(itemId) &&
+                         isValidWhitelistedApp(incoming()) &&
+                         incoming().packageName == existing().packageName &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['appName', 'sha256Fingerprint', 'reason', 'addedAtMillis', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(itemId);
+      }
+
+      // Subcollection: X.509 Certificate Rules
+      match /certificateRules/{ruleId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(ruleId);
+        allow list: if isOwner(userId) && isValidId(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(ruleId) &&
+                         incoming().keys().hasAll(['sha256Fingerprint', 'label', 'trustStatus', 'packageNameHint', 'notes', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['sha256Fingerprint', 'label', 'trustStatus', 'packageNameHint', 'notes', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidCertificateRule(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(ruleId) &&
+                         isValidCertificateRule(incoming()) &&
+                         incoming().sha256Fingerprint == existing().sha256Fingerprint &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['label', 'trustStatus', 'packageNameHint', 'notes', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(ruleId);
+      }
+
+      // Subcollection: Security Scan History
+      match /scanHistory/{recordId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(recordId);
+        allow list: if isOwner(userId) && isValidId(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(recordId) &&
+                         incoming().keys().hasAll(['packageName', 'appName', 'versionName', 'scanSource', 'verdict', 'riskScore', 'sha256Fingerprint', 'findingsSummary', 'scannedAtMillis', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['packageName', 'appName', 'versionName', 'scanSource', 'verdict', 'riskScore', 'sha256Fingerprint', 'findingsSummary', 'scannedAtMillis', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidScanRecord(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(recordId) &&
+                         isValidScanRecord(incoming()) &&
+                         incoming().packageName == existing().packageName &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['appName', 'versionName', 'scanSource', 'verdict', 'riskScore', 'sha256Fingerprint', 'findingsSummary', 'scannedAtMillis', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(recordId);
+      }
+    }
+  }
+}

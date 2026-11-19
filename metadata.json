@@ -1,0 +1,6 @@
+{
+  "name": "Sentinela",
+  "description": "Ferramenta de segurança Android para prevenção de apps maliciosos com análise comportamental em tempo real e verificação de assinaturas digitais.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

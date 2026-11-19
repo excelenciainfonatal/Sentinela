@@ -1,0 +1,229 @@
+{
+  "entities": {
+    "UserSecurityProfile": {
+      "title": "UserSecurityProfile",
+      "description": "Authenticated user profile and cloud security sync preferences",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the account owner"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name from Google Sign-In"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified account email (stored only in owner-restricted profile)"
+        },
+        "autoSyncEnabled": {
+          "type": "boolean",
+          "description": "Whether automatic cloud backup is active for this user"
+        },
+        "totalSyncedScans": {
+          "type": "integer",
+          "description": "Number of scan history entries synced by this account"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was created (FieldValue.serverTimestamp())"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was last updated (FieldValue.serverTimestamp())"
+        }
+      },
+      "required": [
+        "userId",
+        "displayName",
+        "autoSyncEnabled",
+        "totalSyncedScans",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CloudWhitelistedApp": {
+      "title": "CloudWhitelistedApp",
+      "description": "Trusted application excluded from real-time security scanning and backed up to cloud",
+      "type": "object",
+      "properties": {
+        "packageName": {
+          "type": "string",
+          "description": "Android package name of the trusted app"
+        },
+        "appName": {
+          "type": "string",
+          "description": "Human-readable application label"
+        },
+        "sha256Fingerprint": {
+          "type": "string",
+          "description": "SHA-256 signing certificate fingerprint or SEM ASSINATURA"
+        },
+        "reason": {
+          "type": "string",
+          "description": "User reason for whitelisting the package"
+        },
+        "addedAtMillis": {
+          "type": "integer",
+          "description": "Client epoch millis when the app was whitelisted"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation (FieldValue.serverTimestamp())"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update (FieldValue.serverTimestamp())"
+        }
+      },
+      "required": [
+        "packageName",
+        "appName",
+        "sha256Fingerprint",
+        "reason",
+        "addedAtMillis",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CloudCertificateRule": {
+      "title": "CloudCertificateRule",
+      "description": "Manual X.509 signing certificate trust or block rule synced per user",
+      "type": "object",
+      "properties": {
+        "sha256Fingerprint": {
+          "type": "string",
+          "description": "Normalized X.509 SHA-256 fingerprint"
+        },
+        "label": {
+          "type": "string",
+          "description": "Certificate subject or app label"
+        },
+        "trustStatus": {
+          "type": "string",
+          "enum": ["TRUSTED", "BLOCKED"],
+          "description": "Trust classification enforced during APK and package audits"
+        },
+        "packageNameHint": {
+          "type": "string",
+          "description": "Associated Android package name hint"
+        },
+        "notes": {
+          "type": "string",
+          "description": "Audit notes for the certificate rule"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation (FieldValue.serverTimestamp())"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update (FieldValue.serverTimestamp())"
+        }
+      },
+      "required": [
+        "sha256Fingerprint",
+        "label",
+        "trustStatus",
+        "packageNameHint",
+        "notes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CloudScanRecord": {
+      "title": "CloudScanRecord",
+      "description": "Cloud-backed security scan audit record for threat history persistence",
+      "type": "object",
+      "properties": {
+        "packageName": {
+          "type": "string",
+          "description": "Scanned Android package identifier"
+        },
+        "appName": {
+          "type": "string",
+          "description": "Scanned application display name"
+        },
+        "versionName": {
+          "type": "string",
+          "description": "Application version string"
+        },
+        "scanSource": {
+          "type": "string",
+          "enum": ["GATEKEEPER_APK", "VARREDURA_DISPOSITIVO", "TEMPO_REAL"],
+          "description": "Origin of the security scan"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": ["SEGURO", "SUSPEITO", "BLOQUEADO"],
+          "description": "Final security verdict"
+        },
+        "riskScore": {
+          "type": "integer",
+          "description": "Calculated risk score from 0 to 100"
+        },
+        "sha256Fingerprint": {
+          "type": "string",
+          "description": "Signing certificate SHA-256 fingerprint"
+        },
+        "findingsSummary": {
+          "type": "string",
+          "description": "Concise summary of security findings"
+        },
+        "scannedAtMillis": {
+          "type": "integer",
+          "description": "Epoch milliseconds when the scan was executed"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation (FieldValue.serverTimestamp())"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update (FieldValue.serverTimestamp())"
+        }
+      },
+      "required": [
+        "packageName",
+        "appName",
+        "versionName",
+        "scanSource",
+        "verdict",
+        "riskScore",
+        "sha256Fingerprint",
+        "findingsSummary",
+        "scannedAtMillis",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserSecurityProfile" },
+      "description": "Owner-only user security profile and sync settings"
+    },
+    "/users/{userId}/whitelist/{itemId}": {
+      "schema": { "$ref": "#/entities/CloudWhitelistedApp" },
+      "description": "Owner-only synced whitelist entries"
+    },
+    "/users/{userId}/certificateRules/{ruleId}": {
+      "schema": { "$ref": "#/entities/CloudCertificateRule" },
+      "description": "Owner-only synced X.509 certificate trust/block rules"
+    },
+    "/users/{userId}/scanHistory/{recordId}": {
+      "schema": { "$ref": "#/entities/CloudScanRecord" },
+      "description": "Owner-only synced security scan history records"
+    }
+  }
+}

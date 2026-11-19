@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">Sentinela</string>
+    <string name="nav_dashboard">Início</string>
+    <string name="nav_gatekeeper">Verificar</string>
+    <string name="nav_behavior">Apps</string>
+    <string name="nav_signatures">Assinaturas</string>
+    <string name="nav_history">Histórico</string>
+    <string name="monitor_channel_name">Proteção em Tempo Real</string>
+    <string name="monitor_channel_desc">Monitoramento automático de novos aplicativos instalados no celular</string>
+    <string name="alerts_channel_name">Alertas de Segurança</string>
+    <string name="alerts_channel_desc">Avisos imediatos quando um aplicativo suspeito ou perigoso é detectado</string>
+    <string name="monitor_notif_title">Proteção Sentinela Ativa</string>
+    <string name="monitor_notif_body">Seu celular está sendo protegido automaticamente</string>
+</resources>
