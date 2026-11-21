@@ -65,6 +65,7 @@ import com.example.data.local.ScanAuditEntity
 import com.example.data.local.SecurityVerdict
 import com.example.data.local.TrustStatus
 import com.example.ui.SentinelaUiState
+import com.example.ui.components.ThreatSignalBadgesRow
 import com.example.ui.components.VerdictBadge
 import com.example.ui.components.friendlyInstallerSource
 import com.example.ui.components.verdictColor
@@ -73,6 +74,10 @@ enum class AppsCatalogFilter(val labelPt: String) {
   BLOQUEADOS("Risco Alto"),
   AUTORIZADOS("Seguros"),
   SUSPEITOS("Atenção"),
+  PLAY_STORE_ALERTAS("Play Store c/ Alerta"),
+  EXTERNOS("Fora da Loja"),
+  ACESSIBILIDADE("Acessibilidade"),
+  COMUNICACAO_OCULTA("Envio Oculto"),
   TODOS("Todos"),
   APKS("Arquivos APK"),
 }
@@ -93,6 +98,7 @@ fun AppsCatalogScreen(
   onNavigateToGatekeeper: () -> Unit,
   onNavigateToSignatures: () -> Unit,
   onNavigateToHistory: () -> Unit,
+  onNavigateToThreatCatalog: () -> Unit,
   onShowMessage: (String) -> Unit,
 ) {
   BackHandler(onBack = onBack)
@@ -151,13 +157,23 @@ fun AppsCatalogScreen(
                 (!app.isSystemApp &&
                   app.sourceType != "APK_PRE_INSTALL" &&
                   app.installerSource != "com.android.vending")
+            AppsCatalogFilter.PLAY_STORE_ALERTAS ->
+              (app.isPlayStoreApp || app.installerSource == "com.android.vending") &&
+                app.verdict != SecurityVerdict.SEGURO.name
+            AppsCatalogFilter.EXTERNOS ->
+              !app.isSystemApp &&
+                !app.isPlayStoreApp &&
+                app.installerSource != "com.android.vending"
+            AppsCatalogFilter.ACESSIBILIDADE -> app.hasAccessibilityAbuse
+            AppsCatalogFilter.COMUNICACAO_OCULTA -> app.hasHiddenCommunication
             AppsCatalogFilter.TODOS -> true
             AppsCatalogFilter.APKS -> app.sourceType == "APK_PRE_INSTALL"
           }
         val matchesQuery =
           query.isEmpty() ||
             app.appName.contains(query, ignoreCase = true) ||
-            app.packageName.contains(query, ignoreCase = true)
+            app.packageName.contains(query, ignoreCase = true) ||
+            app.matchedThreatName.contains(query, ignoreCase = true)
         matchesTab && matchesQuery
       }
     }
@@ -290,6 +306,18 @@ fun AppsCatalogScreen(
               label = { Text("Assinaturas") },
               modifier = Modifier.testTag("catalog_fn_signatures"),
             )
+            AssistChip(
+              onClick = onNavigateToThreatCatalog,
+              leadingIcon = {
+                Icon(
+                  Icons.Filled.Security,
+                  contentDescription = null,
+                  modifier = Modifier.size(16.dp),
+                )
+              },
+              label = { Text("Banco de Ameaças (${uiState.threatCatalog.size})") },
+              modifier = Modifier.testTag("catalog_fn_threat_catalog"),
+            )
           }
         }
 
@@ -353,6 +381,10 @@ fun AppsCatalogScreen(
                       AppsCatalogFilter.SUSPEITOS -> "Nenhum aplicativo em atenção"
                       AppsCatalogFilter.AUTORIZADOS -> "Nenhum aplicativo seguro listado"
                       AppsCatalogFilter.APKS -> "Nenhum arquivo .APK analisado ainda"
+                      AppsCatalogFilter.PLAY_STORE_ALERTAS -> "Nenhum app da Play Store com alerta"
+                      AppsCatalogFilter.EXTERNOS -> "Nenhum aplicativo fora da Play Store"
+                      AppsCatalogFilter.ACESSIBILIDADE -> "Nenhum abuso de Acessibilidade detectado"
+                      AppsCatalogFilter.COMUNICACAO_OCULTA -> "Nenhuma comunicação oculta detectada"
                       AppsCatalogFilter.TODOS -> "Nenhum aplicativo encontrado"
                     },
                   style = MaterialTheme.typography.titleMedium,
@@ -521,7 +553,9 @@ private fun CatalogAppCard(
         }
       }
 
-      if (isWhitelisted || isTrustedCert || app.sourceType == "APK_PRE_INSTALL") {
+      ThreatSignalBadgesRow(audit = app)
+
+      if (isWhitelisted || isTrustedCert) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
           if (isWhitelisted) {
             Surface(

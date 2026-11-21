@@ -6,6 +6,7 @@ import com.example.data.local.SentinelaDatabase
 import com.example.data.preferences.SecurityPreferences
 import com.example.security.ApkGatekeeperAnalyzer
 import com.example.security.BehaviorMonitorEngine
+import com.example.security.GoogleThreatFeedUpdater
 import com.example.service.SecurityNotifier
 
 class SentinelaApplication : Application() {
@@ -25,6 +26,7 @@ class SentinelaApplication : Application() {
         preferences = prefs,
         apkAnalyzer = ApkGatekeeperAnalyzer(this),
         behaviorEngine = BehaviorMonitorEngine(this),
+        googleUpdater = GoogleThreatFeedUpdater(this),
       )
   }
 }

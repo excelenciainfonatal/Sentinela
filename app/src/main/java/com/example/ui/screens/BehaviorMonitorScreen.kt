@@ -50,6 +50,7 @@ import com.example.data.local.EventSeverity
 import com.example.data.local.SecurityVerdict
 import com.example.ui.BehaviorFilter
 import com.example.ui.SentinelaUiState
+import com.example.ui.components.ThreatSignalBadgesRow
 import com.example.ui.components.VerdictBadge
 import com.example.ui.components.formatTimestampPt
 import com.example.ui.components.friendlyInstallerSource
@@ -80,6 +81,9 @@ fun BehaviorMonitorScreen(
             BehaviorFilter.TODOS -> true
             BehaviorFilter.ALTO_RISCO -> app.verdict == SecurityVerdict.BLOQUEADO.name
             BehaviorFilter.SUSPEITOS -> app.verdict == SecurityVerdict.SUSPEITO.name
+            BehaviorFilter.PLAY_STORE_ALERTAS ->
+              (app.isPlayStoreApp || app.installerSource == "com.android.vending") &&
+                app.verdict != SecurityVerdict.SEGURO.name
             BehaviorFilter.SEGUROS -> app.verdict == SecurityVerdict.SEGURO.name
             BehaviorFilter.SIDELOAD ->
               !app.isSystemApp && app.installerSource != "com.android.vending"
@@ -353,6 +357,8 @@ fun BehaviorMonitorScreen(
                   maxLines = 1,
                   overflow = TextOverflow.Ellipsis,
                 )
+                Spacer(Modifier.height(6.dp))
+                ThreatSignalBadgesRow(app)
               }
               Spacer(Modifier.width(12.dp))
               Column(horizontalAlignment = Alignment.End) {

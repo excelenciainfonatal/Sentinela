@@ -9,13 +9,18 @@ import com.example.data.local.ScanAuditEntity
 import com.example.data.local.ScanHistoryEntity
 import com.example.data.local.SecurityVerdict
 import com.example.data.local.SentinelaDao
+import com.example.data.local.ThreatCatalogEntity
+import com.example.data.local.ThreatCatalogSeeder
+import com.example.data.local.ThreatType
 import com.example.data.local.TrustStatus
 import com.example.data.local.WhitelistedAppEntity
 import com.example.data.preferences.SecurityPreferences
 import com.example.data.preferences.SecuritySettings
+import com.example.security.AntivirusUpdateResult
 import com.example.security.ApkGatekeeperAnalyzer
 import com.example.security.ApkInspectionReport
 import com.example.security.BehaviorMonitorEngine
+import com.example.security.GoogleThreatFeedUpdater
 import com.example.service.MonitorServiceState
 import com.example.service.SecurityNotifier
 import com.example.service.ThreatAlertType
@@ -31,6 +36,11 @@ data class ThreatStatsSummary(
   val suspiciousCount: Int = 0,
   val safeCount: Int = 0,
   val invalidSignatureCount: Int = 0,
+  val playStoreFlaggedCount: Int = 0,
+  val externalFlaggedCount: Int = 0,
+  val accessibilityRiskCount: Int = 0,
+  val permissionAbuseCount: Int = 0,
+  val hiddenCommCount: Int = 0,
   val totalHistoricalScans: Int = 0,
   val historicalThreatsFound: Int = 0,
   val criticalBehaviorEvents: Int = 0,
@@ -44,6 +54,7 @@ class SecurityRepository(
   private val preferences: SecurityPreferences,
   private val apkAnalyzer: ApkGatekeeperAnalyzer,
   val behaviorEngine: BehaviorMonitorEngine,
+  private val googleUpdater: GoogleThreatFeedUpdater = GoogleThreatFeedUpdater(context),
 ) {
 
   private val recentPackageEvents = ConcurrentHashMap<String, Long>()
@@ -55,6 +66,7 @@ class SecurityRepository(
   val behaviorEvents: Flow<List<BehaviorEventEntity>> = dao.observeBehaviorEvents()
   val scanHistory: Flow<List<ScanHistoryEntity>> = dao.observeScanHistory()
   val whitelistedApps: Flow<List<WhitelistedAppEntity>> = dao.observeWhitelistedApps()
+  val threatCatalog: Flow<List<ThreatCatalogEntity>> = dao.observeThreatCatalog()
   val threatStatsSummary: Flow<ThreatStatsSummary> =
     combine(dao.observeAuditStats(), dao.observeHistoryStats(), dao.observeBehaviorStats()) {
       auditStats,
@@ -67,6 +79,11 @@ class SecurityRepository(
         suspiciousCount = auditStats.suspiciousCount,
         safeCount = auditStats.safeCount,
         invalidSignatureCount = auditStats.invalidSignatureCount,
+        playStoreFlaggedCount = auditStats.playStoreFlaggedCount,
+        externalFlaggedCount = auditStats.externalFlaggedCount,
+        accessibilityRiskCount = auditStats.accessibilityRiskCount,
+        permissionAbuseCount = auditStats.permissionAbuseCount,
+        hiddenCommCount = auditStats.hiddenCommCount,
         totalHistoricalScans = historyStats.totalScans,
         historicalThreatsFound = historyStats.historicalThreatsFound,
         criticalBehaviorEvents = behaviorStats.criticalCount,
@@ -81,12 +98,76 @@ class SecurityRepository(
   fun observeAuditWithFallback(id: Long, packageName: String): Flow<ScanAuditEntity?> =
     dao.observeAuditWithFallback(id, packageName)
 
+  suspend fun ensureCatalogSeeded() {
+    if (dao.countThreatCatalog() == 0) {
+      dao.upsertThreatCatalog(ThreatCatalogSeeder.defaultCatalogEntries())
+    }
+  }
+
+  suspend fun restoreDefaultCatalog() {
+    dao.upsertThreatCatalog(ThreatCatalogSeeder.defaultCatalogEntries())
+  }
+
+  suspend fun addCustomThreatCatalogEntry(entry: ThreatCatalogEntity) {
+    dao.upsertThreatCatalogEntry(entry)
+  }
+
+  suspend fun deleteThreatCatalogEntry(threatKey: String) {
+    dao.deleteThreatCatalogEntry(threatKey)
+  }
+
+  suspend fun setAutoAntivirusUpdatesEnabled(enabled: Boolean) {
+    preferences.setAutoAntivirusUpdatesEnabled(enabled)
+  }
+
+  suspend fun updateAntivirusDefinitionsFromGoogle(isAutomatic: Boolean): Result<AntivirusUpdateResult> {
+    ensureCatalogSeeded()
+    val result = googleUpdater.fetchLatestDefinitions()
+    result
+      .onSuccess { update ->
+        dao.upsertThreatCatalog(update.catalogEntries)
+        preferences.recordAntivirusUpdateSuccess(
+          updatedAt = update.updatedAtMillis,
+          versionLabel = update.versionLabel,
+          statusMessage = update.summaryMessagePt,
+          sourceName = update.serverHost,
+          newDefinitionsCount = update.googleAdvisoriesCount,
+          providerVerified = update.providerVerified,
+        )
+        val originLabel = if (isAutomatic) "rotina automática (Google)" else "atualização manual"
+        dao.insertBehaviorEvent(
+          BehaviorEventEntity(
+            packageName = "com.aistudio.sentinela",
+            appName = "Sentinela Antivírus",
+            eventType = "ANTIVIRUS_DEFINITIONS_UPDATED",
+            severity = EventSeverity.INFO.name,
+            details =
+              "Base de ameaças atualizada via $originLabel (${update.serverHost}): ${update.totalCatalogCount} definições ativas.",
+            txBytes = 0L,
+            rxBytes = 0L,
+          )
+        )
+        scanAllInstalledApps()
+      }
+      .onFailure { error ->
+        val providerOk = googleUpdater.verifyGoogleSecurityProvider()
+        preferences.recordAntivirusUpdateFailure(
+          statusMessage = error.message ?: "Falha ao sincronizar com servidor do Google.",
+          providerVerified = providerOk,
+        )
+      }
+    return result
+  }
+
   suspend fun inspectApkForInstallation(uri: Uri): Result<ApkInspectionReport> {
+    ensureCatalogSeeded()
     val currentSettings = settings.first()
+    val catalog = dao.getActiveThreatCatalog()
     val result =
       apkAnalyzer.inspectApkUri(
         uri = uri,
         settings = currentSettings,
+        catalogThreats = catalog,
         trustLookup = { sha -> getTrustStatus(sha) },
         installedSigLookup = { pkg -> dao.getLatestInstalledAuditForPackage(pkg)?.sha256Fingerprint },
       )
@@ -146,18 +227,37 @@ class SecurityRepository(
             rxBytes = 0L,
           )
         )
+        if (currentSettings.pushAlertsEnabled) {
+          val alertType =
+            resolveThreatAlertType(report.audit, defaultForBlocked = ThreatAlertType.BLOCKED_INSTALL)
+          SecurityNotifier.postSecurityThreatPushAlert(
+            context = context,
+            alertType = alertType,
+            title = "APK Suspeito: ${report.audit.appName}",
+            message =
+              "Risco ${report.audit.riskScore}/100 em ${report.fileName}. ${report.findings.firstOrNull().orEmpty()}",
+            appName = report.audit.appName,
+            packageName = report.audit.packageName,
+            sha256Fingerprint = report.audit.sha256Fingerprint,
+            auditId = insertedId,
+            idOffset = 3000,
+          )
+        }
       }
     }
     return result
   }
 
   suspend fun scanAllInstalledApps(): Int {
+    ensureCatalogSeeded()
     val currentSettings = settings.first()
     val whitelisted = dao.observeWhitelistedPackageNames().first().toSet()
+    val catalog = dao.getActiveThreatCatalog()
     val scanned =
       behaviorEngine.auditLauncherPackages(
         settings = currentSettings,
         whitelistedPackages = whitelisted,
+        catalogThreats = catalog,
         trustLookup = { sha -> getTrustStatus(sha) },
         previousSigLookup = { pkg -> dao.getLatestInstalledAuditForPackage(pkg)?.sha256Fingerprint },
       )
@@ -167,6 +267,10 @@ class SecurityRepository(
         audits = scanned,
         scanSource = "VARREDURA_DISPOSITIVO",
       )
+      if (currentSettings.pushAlertsEnabled) {
+        val persistedAudits = installedAppAudits.first()
+        notifyDetectedThreatsForAudits(persistedAudits, whitelisted)
+      }
     }
 
     runBehavioralSweep()
@@ -262,6 +366,7 @@ class SecurityRepository(
   }
 
   suspend fun handlePackageInstalledEvent(packageName: String, isUpdate: Boolean) {
+    ensureCatalogSeeded()
     val now = System.currentTimeMillis()
     val previousEventTime = recentPackageEvents[packageName]
     if (previousEventTime != null && (now - previousEventTime) < 4_000L) {
@@ -276,11 +381,13 @@ class SecurityRepository(
 
     val currentSettings = settings.first()
     val previousSig = dao.getLatestInstalledAuditForPackage(packageName)?.sha256Fingerprint
+    val catalog = dao.getActiveThreatCatalog()
     val audit =
       behaviorEngine.auditSingleInstalledPackage(
         packageName = packageName,
         sourceType = "PACKAGE_ADDED",
         settings = currentSettings,
+        catalogThreats = catalog,
         trustLookup = { sha -> getTrustStatus(sha) },
         previousSigLookup = { previousSig },
       ) ?: return
@@ -334,14 +441,13 @@ class SecurityRepository(
 
     if (currentSettings.pushAlertsEnabled && (severity != EventSeverity.INFO || hasInvalidSignature)) {
       val alertType =
-        when {
-          hasInvalidSignature -> ThreatAlertType.INVALID_SIGNATURE
-          verdict == SecurityVerdict.BLOQUEADO -> ThreatAlertType.BLOCKED_INSTALL
-          else -> ThreatAlertType.SUSPICIOUS_BEHAVIOR
-        }
+        resolveThreatAlertType(audit, defaultForBlocked = ThreatAlertType.MALWARE_DETECTED)
       val title =
-        if (hasInvalidSignature) "Assinatura Inválida Detectada: ${audit.appName}"
-        else "Alerta em Tempo Real: ${audit.appName}"
+        when {
+          hasInvalidSignature -> "Assinatura Inválida Detectada: ${audit.appName}"
+          verdict == SecurityVerdict.BLOQUEADO -> "Ameaça Bloqueada: ${audit.appName}"
+          else -> "Alerta em Tempo Real: ${audit.appName}"
+        }
       val reasonHint =
         audit.findingsSummary.lineSequence().firstOrNull()?.removePrefix("• ")?.trim().orEmpty()
       SecurityNotifier.postSecurityThreatPushAlert(
@@ -387,6 +493,64 @@ class SecurityRepository(
     scanAllInstalledApps()
   }
 
+  suspend fun blockThreatFromNotification(
+    packageName: String,
+    appName: String,
+    sha256Fingerprint: String,
+  ) {
+    val cleanPkg = packageName.trim()
+    val cleanSha = sha256Fingerprint.trim()
+    val displayLabel = appName.ifBlank { cleanPkg }.ifBlank { "Aplicativo bloqueado" }
+
+    if (cleanPkg.isNotBlank()) {
+      dao.removeWhitelistedApp(cleanPkg)
+      dao.upsertThreatCatalogEntry(
+        ThreatCatalogEntity(
+          threatKey = "USER_BLOCK_${cleanPkg.replace(Regex("[^A-Za-z0-9._-]"), "_")}",
+          name = "Bloqueado pelo usuário: $displayLabel",
+          threatType = ThreatType.ARQUIVO_MALICIOSO.name,
+          severityScore = 95,
+          packagePatterns = cleanPkg,
+          sha256Signatures =
+            if (cleanSha.isNotBlank() && cleanSha != "SEM ASSINATURA") cleanSha else "",
+          permissionSignature = "",
+          indicatorTokens = "",
+          descriptionPt = "Aplicativo bloqueado diretamente pela ação rápida na notificação.",
+          recommendationPt = "Mantenha bloqueado ou desinstale o aplicativo do aparelho.",
+          sourceReference = "Bloqueio Rápido via Notificação",
+        )
+      )
+      dao.markAuditBlockedFromNotification(
+        packageName = cleanPkg,
+        summary = "• Bloqueado imediatamente pelo usuário através da notificação de alerta.",
+      )
+    }
+
+    if (cleanSha.isNotBlank() && cleanSha != "SEM ASSINATURA") {
+      dao.upsertCertificateRule(
+        CertificateRuleEntity(
+          sha256Fingerprint = cleanSha,
+          label = displayLabel,
+          trustStatus = TrustStatus.BLOCKED.name,
+          packageNameHint = cleanPkg,
+          notes = "Bloqueado diretamente a partir do alerta local do Sentinela",
+        )
+      )
+    }
+
+    dao.insertBehaviorEvent(
+      BehaviorEventEntity(
+        packageName = cleanPkg.ifBlank { "com.aistudio.sentinela" },
+        appName = displayLabel,
+        eventType = "THREAT_BLOCKED_NOTIFICATION",
+        severity = EventSeverity.CRITICAL.name,
+        details = "Ação rápida aplicada pela notificação: $displayLabel bloqueado pelo usuário.",
+        txBytes = 0L,
+        rxBytes = 0L,
+      )
+    )
+  }
+
   suspend fun deleteAudit(id: Long) {
     dao.deleteAuditById(id)
   }
@@ -425,12 +589,15 @@ class SecurityRepository(
 
   suspend fun removeFromWhitelist(packageName: String) {
     dao.removeWhitelistedApp(packageName)
+    ensureCatalogSeeded()
     val currentSettings = settings.first()
+    val catalog = dao.getActiveThreatCatalog()
     val audit =
       behaviorEngine.auditSingleInstalledPackage(
         packageName = packageName,
         sourceType = "INSTALLED_APP",
         settings = currentSettings,
+        catalogThreats = catalog,
         trustLookup = { sha -> getTrustStatus(sha) },
         previousSigLookup = { null },
       )
@@ -485,17 +652,119 @@ class SecurityRepository(
     val posted =
       SecurityNotifier.postSecurityThreatPushAlert(
         context = context,
-        alertType = ThreatAlertType.INVALID_SIGNATURE,
-        title = "Teste de Alerta Push: Sentinela",
+        alertType = ThreatAlertType.MALWARE_DETECTED,
+        title = "Teste de Alerta Imediato: Sentinela",
         message =
-          "Simulação de notificação crítica para assinatura digital inválida ou comportamento anômalo detectado em segundo plano.",
+          "Simulação de ameaça detectada. Em ocorrências reais você pode usar Desinstalar, Bloquear ou Inspecionar direto na notificação.",
         appName = "Sentinela Verificação",
         packageName = null,
-        sha256Fingerprint = null,
+        sha256Fingerprint = "TEST:AA:BB:CC:DD:EE:FF:00:11:22:33",
         auditId = -1L,
         idOffset = 7000,
       )
     return posted != null
+  }
+
+  private suspend fun notifyDetectedThreatsForAudits(
+    audits: List<ScanAuditEntity>,
+    whitelisted: Set<String>,
+  ) {
+    val alertCutoff = System.currentTimeMillis() - 6 * 60 * 60 * 1000L
+    val candidates =
+      audits.filter { audit ->
+        !audit.isSystemApp &&
+          audit.packageName !in whitelisted &&
+          (audit.verdict == SecurityVerdict.BLOQUEADO.name ||
+            (audit.verdict == SecurityVerdict.SUSPEITO.name &&
+              (audit.hasAccessibilityAbuse ||
+                audit.hasPermissionAbuse ||
+                audit.hasHiddenCommunication ||
+                audit.matchedThreatName.isNotBlank())))
+      }
+
+    for (audit in candidates) {
+      val recent = dao.findRecentEvent(audit.packageName, "THREAT_PUSH_ALERTED", alertCutoff)
+      if (recent != null) continue
+
+      val alertType =
+        resolveThreatAlertType(audit, defaultForBlocked = ThreatAlertType.MALWARE_DETECTED)
+      val firstFinding =
+        audit.findingsSummary.lineSequence().firstOrNull()?.removePrefix("• ")?.trim().orEmpty()
+      val title =
+        when (alertType) {
+          ThreatAlertType.ACCESSIBILITY_ABUSE -> "Alerta de Acessibilidade: ${audit.appName}"
+          ThreatAlertType.PERMISSION_ABUSE -> "Abuso de Permissões: ${audit.appName}"
+          ThreatAlertType.HIDDEN_COMMUNICATION -> "Comunicação Oculta: ${audit.appName}"
+          ThreatAlertType.INVALID_SIGNATURE -> "Assinatura Inválida: ${audit.appName}"
+          ThreatAlertType.MALWARE_DETECTED ->
+            if (audit.matchedThreatName.isNotBlank()) {
+              "Ameaça Detectada: ${audit.appName}"
+            } else {
+              "App de Alto Risco: ${audit.appName}"
+            }
+          else -> "Alerta de Segurança: ${audit.appName}"
+        }
+      val originTag = if (audit.isPlayStoreApp) "Play Store" else "Fonte externa"
+      val detailText =
+        buildString {
+          append("$originTag • Risco ${audit.riskScore}/100. ")
+          if (audit.matchedThreatName.isNotBlank()) {
+            append("Correspondência: ${audit.matchedThreatName}. ")
+          }
+          if (firstFinding.isNotBlank()) {
+            append(firstFinding)
+          }
+        }
+
+      val postedId =
+        SecurityNotifier.postSecurityThreatPushAlert(
+          context = context,
+          alertType = alertType,
+          title = title,
+          message = detailText.trim(),
+          appName = audit.appName,
+          packageName = audit.packageName,
+          sha256Fingerprint = audit.sha256Fingerprint,
+          auditId = audit.id,
+          idOffset = 8000,
+        )
+
+      if (postedId != null) {
+        dao.insertBehaviorEvent(
+          BehaviorEventEntity(
+            packageName = audit.packageName,
+            appName = audit.appName,
+            eventType = "THREAT_PUSH_ALERTED",
+            severity =
+              if (audit.verdict == SecurityVerdict.BLOQUEADO.name) EventSeverity.CRITICAL.name
+              else EventSeverity.WARNING.name,
+            details = "Notificação imediata emitida: ${detailText.trim()}",
+            txBytes = audit.txBytes,
+            rxBytes = audit.rxBytes,
+          )
+        )
+      }
+    }
+  }
+
+  private fun resolveThreatAlertType(
+    audit: ScanAuditEntity,
+    defaultForBlocked: ThreatAlertType,
+  ): ThreatAlertType {
+    val hasInvalidSig =
+      audit.signatureMismatch ||
+        audit.isExpiredCert ||
+        audit.isDebugCert ||
+        audit.sha256Fingerprint == "SEM ASSINATURA"
+    return when {
+      hasInvalidSig -> ThreatAlertType.INVALID_SIGNATURE
+      audit.hasAccessibilityAbuse -> ThreatAlertType.ACCESSIBILITY_ABUSE
+      audit.hasHiddenCommunication -> ThreatAlertType.HIDDEN_COMMUNICATION
+      audit.hasPermissionAbuse -> ThreatAlertType.PERMISSION_ABUSE
+      audit.matchedThreatName.isNotBlank() -> ThreatAlertType.MALWARE_DETECTED
+      audit.verdict == SecurityVerdict.BLOQUEADO.name -> defaultForBlocked
+      else -> ThreatAlertType.SUSPICIOUS_BEHAVIOR
+    }
   }
 
   private suspend fun getTrustStatus(sha256: String): TrustStatus {

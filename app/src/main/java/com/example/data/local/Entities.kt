@@ -22,6 +22,24 @@ enum class EventSeverity(val labelPt: String) {
   CRITICAL("Crítico"),
 }
 
+enum class ThreatType(val labelPt: String) {
+  VIRUS("Vírus / Trojan"),
+  SPYWARE("Spyware"),
+  ADWARE("Adware"),
+  ARQUIVO_MALICIOSO("Arquivo Malicioso"),
+}
+
+enum class ThreatClassification(val labelPt: String) {
+  SEGURO("Seguro"),
+  VIRUS_TROJAN("Vírus / Trojan Bancário"),
+  SPYWARE("Spyware / Espião"),
+  ADWARE("Adware / Propagandas"),
+  ABUSO_PERMISSAO("Abuso de Permissão"),
+  ACESSIBILIDADE("Abuso de Acessibilidade"),
+  COMUNICACAO_OCULTA("Comunicação Oculta"),
+  ARQUIVO_MALICIOSO("Arquivo Malicioso"),
+}
+
 @Immutable
 @Entity(tableName = "scan_audits")
 data class ScanAuditEntity(
@@ -51,6 +69,12 @@ data class ScanAuditEntity(
   val findingsSummary: String,
   val dangerousPermissions: String,
   val scannedAt: Long = System.currentTimeMillis(),
+  val threatCategory: String = ThreatClassification.SEGURO.name,
+  val isPlayStoreApp: Boolean = false,
+  val hasAccessibilityAbuse: Boolean = false,
+  val hasPermissionAbuse: Boolean = false,
+  val hasHiddenCommunication: Boolean = false,
+  val matchedThreatName: String = "",
 )
 
 @Immutable
@@ -102,4 +126,22 @@ data class WhitelistedAppEntity(
   val sha256Fingerprint: String,
   val reason: String = "Marcado pelo usuário como confiável",
   val addedAt: Long = System.currentTimeMillis(),
+)
+
+@Immutable
+@Entity(tableName = "threat_catalog")
+data class ThreatCatalogEntity(
+  @PrimaryKey val threatKey: String,
+  val name: String,
+  val threatType: String, // ThreatType name: VIRUS, SPYWARE, ADWARE, ARQUIVO_MALICIOSO
+  val severityScore: Int,
+  val packagePatterns: String,
+  val sha256Signatures: String,
+  val permissionSignature: String,
+  val indicatorTokens: String,
+  val descriptionPt: String,
+  val recommendationPt: String,
+  val sourceReference: String = "Catálogo Sentinela",
+  val isActive: Boolean = true,
+  val updatedAt: Long = System.currentTimeMillis(),
 )

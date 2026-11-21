@@ -10,7 +10,6 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
-import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
@@ -20,6 +19,10 @@ enum class ThreatAlertType(val badgeLabel: String) {
   INVALID_SIGNATURE("Assinatura Inválida"),
   SUSPICIOUS_BEHAVIOR("Comportamento Suspeito"),
   BLOCKED_INSTALL("Instalação Bloqueada"),
+  MALWARE_DETECTED("Ameaça Catalogada"),
+  ACCESSIBILITY_ABUSE("Abuso de Acessibilidade"),
+  PERMISSION_ABUSE("Abuso de Permissões"),
+  HIDDEN_COMMUNICATION("Comunicação Oculta"),
 }
 
 object SecurityNotifier {
@@ -29,6 +32,7 @@ object SecurityNotifier {
   const val MONITOR_NOTIFICATION_ID = 1001
 
   const val EXTRA_AUDIT_ID = "extra_audit_id"
+  const val EXTRA_PACKAGE_NAME = "extra_package_name"
   const val EXTRA_TARGET_TAB = "extra_target_tab"
 
   fun ensureChannels(context: Context) {
@@ -123,7 +127,11 @@ object SecurityNotifier {
         flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
         if (auditId > 0L) {
           putExtra(EXTRA_AUDIT_ID, auditId)
-        } else {
+        }
+        if (!packageName.isNullOrBlank()) {
+          putExtra(EXTRA_PACKAGE_NAME, packageName)
+        }
+        if (auditId <= 0L && packageName.isNullOrBlank()) {
           putExtra(EXTRA_TARGET_TAB, "behavior")
         }
       }
@@ -149,17 +157,38 @@ object SecurityNotifier {
         .setDefaults(NotificationCompat.DEFAULT_ALL)
         .setAutoCancel(true)
         .setContentIntent(contentPendingIntent)
-        .addAction(
-          android.R.drawable.ic_menu_info_details,
-          "Inspecionar",
-          contentPendingIntent,
-        )
 
-    if (!sha256Fingerprint.isNullOrBlank() && sha256Fingerprint != "SEM ASSINATURA") {
+    val hasValidPackage = !packageName.isNullOrBlank() && packageName != context.packageName
+    val hasValidSignature =
+      !sha256Fingerprint.isNullOrBlank() && sha256Fingerprint != "SEM ASSINATURA"
+
+    // 1. Quick Uninstall Action (system confirmation dialog via ACTION_DELETE)
+    if (hasValidPackage && alertType != ThreatAlertType.BLOCKED_INSTALL) {
+      val uninstallIntent =
+        Intent(Intent.ACTION_DELETE).apply {
+          data = Uri.fromParts("package", packageName, null)
+          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+      val uninstallPendingIntent =
+        PendingIntent.getActivity(
+          context,
+          notificationId + 20_000,
+          uninstallIntent,
+          PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+      builder.addAction(
+        android.R.drawable.ic_menu_delete,
+        "Desinstalar",
+        uninstallPendingIntent,
+      )
+    }
+
+    // 2. Quick Block Action (blocks signature and/or package in Sentinela database)
+    if (hasValidSignature || hasValidPackage) {
       val blockIntent =
         Intent(context, NotificationActionReceiver::class.java).apply {
-          action = NotificationActionReceiver.ACTION_BLOCK_SIGNATURE
-          putExtra(NotificationActionReceiver.EXTRA_SHA256, sha256Fingerprint)
+          action = NotificationActionReceiver.ACTION_BLOCK_THREAT
+          putExtra(NotificationActionReceiver.EXTRA_SHA256, sha256Fingerprint.orEmpty())
           putExtra(NotificationActionReceiver.EXTRA_APP_NAME, appName.ifBlank { title })
           putExtra(NotificationActionReceiver.EXTRA_PACKAGE_NAME, packageName.orEmpty())
           putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_ID, notificationId)
@@ -173,34 +202,27 @@ object SecurityNotifier {
         )
       builder.addAction(
         android.R.drawable.ic_delete,
-        "Bloquear Assinatura",
+        "Bloquear",
         blockPendingIntent,
       )
     }
 
-    if (!packageName.isNullOrBlank() && alertType != ThreatAlertType.BLOCKED_INSTALL) {
-      val settingsIntent =
-        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-          data = Uri.fromParts("package", packageName, null)
-          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-      val settingsPendingIntent =
-        PendingIntent.getActivity(
-          context,
-          notificationId + 20_000,
-          settingsIntent,
-          PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-      builder.addAction(
-        android.R.drawable.ic_menu_manage,
-        "Gerenciar App",
-        settingsPendingIntent,
-      )
-    }
+    // 3. Inspect Audit Action
+    builder.addAction(
+      android.R.drawable.ic_menu_info_details,
+      "Inspecionar",
+      contentPendingIntent,
+    )
 
     val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     manager.notify(notificationId, builder.build())
     return notificationId
+  }
+
+  fun cancelNotification(context: Context, notificationId: Int) {
+    if (notificationId == -1) return
+    val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    manager.cancel(notificationId)
   }
 
   fun postThreatAlert(context: Context, title: String, message: String, idOffset: Int = 2000) {

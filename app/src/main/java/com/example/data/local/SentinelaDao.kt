@@ -127,7 +127,12 @@ interface SentinelaDao {
       COALESCE(SUM(CASE WHEN verdict = 'BLOQUEADO' THEN 1 ELSE 0 END), 0) AS blockedCount,
       COALESCE(SUM(CASE WHEN verdict = 'SUSPEITO' THEN 1 ELSE 0 END), 0) AS suspiciousCount,
       COALESCE(SUM(CASE WHEN verdict = 'SEGURO' THEN 1 ELSE 0 END), 0) AS safeCount,
-      COALESCE(SUM(CASE WHEN isDebugCert = 1 OR isExpiredCert = 1 OR signatureMismatch = 1 OR sha256Fingerprint = 'SEM ASSINATURA' THEN 1 ELSE 0 END), 0) AS invalidSignatureCount
+      COALESCE(SUM(CASE WHEN isDebugCert = 1 OR isExpiredCert = 1 OR signatureMismatch = 1 OR sha256Fingerprint = 'SEM ASSINATURA' THEN 1 ELSE 0 END), 0) AS invalidSignatureCount,
+      COALESCE(SUM(CASE WHEN isPlayStoreApp = 1 AND verdict != 'SEGURO' THEN 1 ELSE 0 END), 0) AS playStoreFlaggedCount,
+      COALESCE(SUM(CASE WHEN isPlayStoreApp = 0 AND isSystemApp = 0 AND verdict != 'SEGURO' THEN 1 ELSE 0 END), 0) AS externalFlaggedCount,
+      COALESCE(SUM(CASE WHEN hasAccessibilityAbuse = 1 THEN 1 ELSE 0 END), 0) AS accessibilityRiskCount,
+      COALESCE(SUM(CASE WHEN hasPermissionAbuse = 1 THEN 1 ELSE 0 END), 0) AS permissionAbuseCount,
+      COALESCE(SUM(CASE WHEN hasHiddenCommunication = 1 THEN 1 ELSE 0 END), 0) AS hiddenCommCount
     FROM scan_audits
     """
   )
@@ -174,9 +179,33 @@ interface SentinelaDao {
   suspend fun clearWhitelist()
 
   @Query(
-    "UPDATE scan_audits SET verdict = 'SEGURO', riskScore = 0, findingsSummary = :summary WHERE packageName = :packageName AND sourceType != 'APK_PRE_INSTALL'"
+    "UPDATE scan_audits SET verdict = 'SEGURO', riskScore = 0, threatCategory = 'SEGURO', hasAccessibilityAbuse = 0, hasPermissionAbuse = 0, hasHiddenCommunication = 0, matchedThreatName = '', findingsSummary = :summary WHERE packageName = :packageName AND sourceType != 'APK_PRE_INSTALL'"
   )
   suspend fun markAuditSafeForWhitelist(packageName: String, summary: String)
+
+  @Query(
+    "UPDATE scan_audits SET verdict = 'BLOQUEADO', riskScore = 95, findingsSummary = :summary WHERE packageName = :packageName AND sourceType != 'APK_PRE_INSTALL'"
+  )
+  suspend fun markAuditBlockedFromNotification(packageName: String, summary: String)
+
+  // --- Cataloged Threat Database (Vírus, Spywares, Adwares, Arquivos Maliciosos) ---
+  @Query("SELECT * FROM threat_catalog ORDER BY severityScore DESC, name ASC")
+  fun observeThreatCatalog(): Flow<List<ThreatCatalogEntity>>
+
+  @Query("SELECT * FROM threat_catalog WHERE isActive = 1 ORDER BY severityScore DESC")
+  suspend fun getActiveThreatCatalog(): List<ThreatCatalogEntity>
+
+  @Query("SELECT COUNT(*) FROM threat_catalog")
+  suspend fun countThreatCatalog(): Int
+
+  @Insert(onConflict = OnConflictStrategy.REPLACE)
+  suspend fun upsertThreatCatalog(items: List<ThreatCatalogEntity>)
+
+  @Insert(onConflict = OnConflictStrategy.REPLACE)
+  suspend fun upsertThreatCatalogEntry(entry: ThreatCatalogEntity)
+
+  @Query("DELETE FROM threat_catalog WHERE threatKey = :threatKey")
+  suspend fun deleteThreatCatalogEntry(threatKey: String)
 }
 
 data class AuditStatsProjection(
@@ -186,6 +215,11 @@ data class AuditStatsProjection(
   val suspiciousCount: Int = 0,
   val safeCount: Int = 0,
   val invalidSignatureCount: Int = 0,
+  val playStoreFlaggedCount: Int = 0,
+  val externalFlaggedCount: Int = 0,
+  val accessibilityRiskCount: Int = 0,
+  val permissionAbuseCount: Int = 0,
+  val hiddenCommCount: Int = 0,
 )
 
 data class HistoryStatsProjection(

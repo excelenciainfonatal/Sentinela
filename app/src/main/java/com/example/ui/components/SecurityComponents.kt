@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,13 +25,18 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccessibilityNew
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.GppBad
+import androidx.compose.material.icons.filled.LockPerson
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
@@ -43,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -59,7 +67,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.example.data.local.ScanAuditEntity
 import com.example.data.local.SecurityVerdict
+import com.example.data.local.ThreatClassification
 import com.example.data.local.TrustStatus
 import com.example.ui.theme.MonoCodeStyle
 import java.text.SimpleDateFormat
@@ -114,6 +124,136 @@ fun friendlyInstallerSource(source: String?, isSystemApp: Boolean = false, sourc
       source.contains("sideload", ignoreCase = true) ||
       source.contains("Desconhecida", ignoreCase = true) -> "Instalado fora da loja"
     else -> source
+  }
+}
+
+fun friendlyThreatClassificationLabel(categoryName: String): String {
+  return runCatching { ThreatClassification.valueOf(categoryName).labelPt }
+    .getOrDefault(ThreatClassification.SEGURO.labelPt)
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun ThreatSignalBadgesRow(
+  audit: ScanAuditEntity,
+  modifier: Modifier = Modifier,
+) {
+  val isPlayStore = audit.isPlayStoreApp || audit.installerSource == "com.android.vending"
+  val isExternal =
+    !audit.isSystemApp && !isPlayStore && audit.sourceType != "APK_PRE_INSTALL"
+  val threatClass =
+    remember(audit.threatCategory) {
+      runCatching { ThreatClassification.valueOf(audit.threatCategory) }
+        .getOrDefault(ThreatClassification.SEGURO)
+    }
+
+  FlowRow(
+    horizontalArrangement = Arrangement.spacedBy(6.dp),
+    verticalArrangement = Arrangement.spacedBy(6.dp),
+    modifier = modifier,
+  ) {
+    // Provenance badge: Play Store vs Fora da Loja vs Sistema
+    when {
+      isPlayStore ->
+        SignalChip(
+          label = "Google Play",
+          icon = Icons.Filled.Storefront,
+          fg = MaterialTheme.colorScheme.primary,
+          bg = MaterialTheme.colorScheme.primaryContainer,
+        )
+      audit.sourceType == "APK_PRE_INSTALL" ->
+        SignalChip(
+          label = "APK Externo",
+          icon = Icons.Filled.Warning,
+          fg = MaterialTheme.colorScheme.tertiary,
+          bg = MaterialTheme.colorScheme.tertiaryContainer,
+        )
+      isExternal ->
+        SignalChip(
+          label = "Fora da Loja",
+          icon = Icons.Filled.Warning,
+          fg = MaterialTheme.colorScheme.tertiary,
+          bg = MaterialTheme.colorScheme.tertiaryContainer,
+        )
+    }
+
+    // Specific malware/behavioral detection tags
+    if (
+      threatClass == ThreatClassification.VIRUS_TROJAN ||
+        threatClass == ThreatClassification.SPYWARE ||
+        threatClass == ThreatClassification.ADWARE ||
+        threatClass == ThreatClassification.ARQUIVO_MALICIOSO
+    ) {
+      SignalChip(
+        label = threatClass.labelPt,
+        icon = Icons.Filled.BugReport,
+        fg =
+          if (threatClass == ThreatClassification.ADWARE) MaterialTheme.colorScheme.tertiary
+          else MaterialTheme.colorScheme.error,
+        bg =
+          if (threatClass == ThreatClassification.ADWARE) MaterialTheme.colorScheme.tertiaryContainer
+          else MaterialTheme.colorScheme.errorContainer,
+      )
+    }
+
+    if (audit.hasAccessibilityAbuse) {
+      SignalChip(
+        label = "Acessibilidade",
+        icon = Icons.Filled.AccessibilityNew,
+        fg = MaterialTheme.colorScheme.error,
+        bg = MaterialTheme.colorScheme.errorContainer,
+      )
+    }
+
+    if (audit.hasPermissionAbuse) {
+      SignalChip(
+        label = "Abuso de Permissão",
+        icon = Icons.Filled.LockPerson,
+        fg = MaterialTheme.colorScheme.tertiary,
+        bg = MaterialTheme.colorScheme.tertiaryContainer,
+      )
+    }
+
+    if (audit.hasHiddenCommunication) {
+      SignalChip(
+        label = "Comunicação Oculta",
+        icon = Icons.Filled.Public,
+        fg = MaterialTheme.colorScheme.error,
+        bg = MaterialTheme.colorScheme.errorContainer,
+      )
+    }
+  }
+}
+
+@Composable
+private fun SignalChip(
+  label: String,
+  icon: ImageVector,
+  fg: Color,
+  bg: Color,
+) {
+  Surface(
+    color = bg.copy(alpha = 0.85f),
+    contentColor = fg,
+    shape = RoundedCornerShape(50),
+    border = BorderStroke(1.dp, fg.copy(alpha = 0.25f)),
+  ) {
+    Row(
+      verticalAlignment = Alignment.CenterVertically,
+      modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+    ) {
+      Icon(
+        imageVector = icon,
+        contentDescription = label,
+        modifier = Modifier.size(12.dp),
+      )
+      Spacer(Modifier.width(4.dp))
+      Text(
+        text = label,
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.Medium,
+      )
+    }
   }
 }
 

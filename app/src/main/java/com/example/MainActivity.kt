@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -96,6 +97,7 @@ import com.example.ui.screens.BehaviorMonitorScreen
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.ScanHistoryScreen
 import com.example.ui.screens.SignatureRegistryScreen
+import com.example.ui.screens.ThreatCatalogScreen
 import com.example.ui.screens.WhitelistScreen
 import com.example.ui.theme.SentinelaTheme
 import com.google.firebase.Firebase
@@ -114,6 +116,7 @@ private object Routes {
   const val SIGNATURES = "signatures"
   const val HISTORY = "history"
   const val WHITELIST = "whitelist"
+  const val THREAT_CATALOG = "threat_catalog"
   const val APPS_CATALOG = "apps_catalog/{filter}"
   const val DETAIL = "app_detail/{auditId}?pkg={pkg}"
 
@@ -134,25 +137,32 @@ class MainActivity : ComponentActivity() {
 
   private val incomingApkUri = MutableStateFlow<Uri?>(null)
   private val pendingNotificationAuditId = MutableStateFlow<Long?>(null)
+  private val pendingNotificationPackage = MutableStateFlow<String?>(null)
   private val pendingNotificationTab = MutableStateFlow<String?>(null)
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
-    enableEdgeToEdge()
+    enableEdgeToEdge(
+      statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+      navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+    )
     extractIncomingIntent(intent)
 
     setContent {
       SentinelaTheme {
         val pendingUri by incomingApkUri.collectAsStateWithLifecycle()
         val notifAuditId by pendingNotificationAuditId.collectAsStateWithLifecycle()
+        val notifPkg by pendingNotificationPackage.collectAsStateWithLifecycle()
         val notifTab by pendingNotificationTab.collectAsStateWithLifecycle()
         SentinelaAuthGate(
           pendingApkUri = pendingUri,
           onConsumedPendingApkUri = { incomingApkUri.value = null },
           pendingNotificationAuditId = notifAuditId,
+          pendingNotificationPackage = notifPkg,
           pendingNotificationTab = notifTab,
           onConsumedNotificationNav = {
             pendingNotificationAuditId.value = null
+            pendingNotificationPackage.value = null
             pendingNotificationTab.value = null
           },
         )
@@ -171,8 +181,10 @@ class MainActivity : ComponentActivity() {
       intent.data?.let { uri -> incomingApkUri.value = uri }
     }
     val auditId = intent?.getLongExtra(SecurityNotifier.EXTRA_AUDIT_ID, -1L) ?: -1L
-    if (auditId > 0L) {
+    val pkg = intent?.getStringExtra(SecurityNotifier.EXTRA_PACKAGE_NAME).orEmpty()
+    if (auditId > 0L || pkg.isNotBlank()) {
       pendingNotificationAuditId.value = auditId
+      pendingNotificationPackage.value = pkg
     } else {
       intent?.getStringExtra(SecurityNotifier.EXTRA_TARGET_TAB)?.let { tab ->
         pendingNotificationTab.value = tab
@@ -186,6 +198,7 @@ private fun SentinelaAuthGate(
   pendingApkUri: Uri?,
   onConsumedPendingApkUri: () -> Unit,
   pendingNotificationAuditId: Long?,
+  pendingNotificationPackage: String?,
   pendingNotificationTab: String?,
   onConsumedNotificationNav: () -> Unit,
   auth: FirebaseAuth = Firebase.auth,
@@ -235,6 +248,7 @@ private fun SentinelaAuthGate(
         pendingApkUri = pendingApkUri,
         onConsumedPendingApkUri = onConsumedPendingApkUri,
         pendingNotificationAuditId = pendingNotificationAuditId,
+        pendingNotificationPackage = pendingNotificationPackage,
         pendingNotificationTab = pendingNotificationTab,
         onConsumedNotificationNav = onConsumedNotificationNav,
       )
@@ -251,6 +265,7 @@ private fun SentinelaAppRoot(
   pendingApkUri: Uri?,
   onConsumedPendingApkUri: () -> Unit,
   pendingNotificationAuditId: Long?,
+  pendingNotificationPackage: String?,
   pendingNotificationTab: String?,
   onConsumedNotificationNav: () -> Unit,
 ) {
@@ -387,9 +402,16 @@ private fun SentinelaAppRoot(
     }
   }
 
-  LaunchedEffect(pendingNotificationAuditId, pendingNotificationTab) {
-    if (pendingNotificationAuditId != null && pendingNotificationAuditId > 0L) {
-      navController.navigate(Routes.detailRoute(pendingNotificationAuditId))
+  LaunchedEffect(pendingNotificationAuditId, pendingNotificationPackage, pendingNotificationTab) {
+    if ((pendingNotificationAuditId != null && pendingNotificationAuditId > 0L) ||
+      !pendingNotificationPackage.isNullOrBlank()
+    ) {
+      navController.navigate(
+        Routes.detailRoute(
+          pendingNotificationAuditId ?: -1L,
+          pendingNotificationPackage.orEmpty(),
+        )
+      )
       onConsumedNotificationNav()
     } else if (pendingNotificationTab != null) {
       val target = if (pendingNotificationTab == "behavior") Routes.BEHAVIOR else Routes.DASHBOARD
@@ -408,6 +430,7 @@ private fun SentinelaAppRoot(
     currentRoute?.startsWith("app_detail") == true ||
       currentRoute == Routes.WHITELIST ||
       currentRoute == Routes.SIGNATURES ||
+      currentRoute == Routes.THREAT_CATALOG ||
       currentRoute?.startsWith("apps_catalog") == true
 
   BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -549,6 +572,19 @@ private fun SentinelaAppRoot(
                     }
                   }
                 },
+                onUpdateAntivirusNow = {
+                  viewModel.updateAntivirusNow { _, message -> showSnackbar(message) }
+                },
+                onToggleAutoAntivirusUpdates = { enabled ->
+                  viewModel.toggleAutoAntivirusUpdates(enabled)
+                  showSnackbar(
+                    if (enabled) {
+                      "Atualização recorrente do Google ativada (a cada 12h)."
+                    } else {
+                      "Atualização recorrente pausada. Você ainda pode atualizar manualmente."
+                    }
+                  )
+                },
                 onSyncCloud = { cloudSyncViewModel.syncLocalToCloud(showSnackbar) },
                 onRestoreCloud = { cloudSyncViewModel.restoreFromCloudToRoom(showSnackbar) },
                 onToggleCloudAutoSync = { cloudSyncViewModel.toggleAutoSync(it) },
@@ -614,6 +650,7 @@ private fun SentinelaAppRoot(
                   }
                 },
                 onNavigateToWhitelist = { navController.navigate(Routes.WHITELIST) },
+                onNavigateToThreatCatalog = { navController.navigate(Routes.THREAT_CATALOG) },
               )
             }
 
@@ -748,6 +785,20 @@ private fun SentinelaAppRoot(
                     restoreState = true
                   }
                 },
+                onNavigateToThreatCatalog = { navController.navigate(Routes.THREAT_CATALOG) },
+                onShowMessage = showSnackbar,
+              )
+            }
+
+            composable(Routes.THREAT_CATALOG) {
+              ThreatCatalogScreen(
+                uiState = uiState,
+                onBack = { navController.popBackStack() },
+                onAddCustomThreat = { name, type, pkg, sha, desc ->
+                  viewModel.addCustomThreatToCatalog(name, type, pkg, sha, desc)
+                },
+                onDeleteCustomThreat = { key -> viewModel.deleteThreatFromCatalog(key) },
+                onRestoreDefaults = { viewModel.restoreDefaultThreatCatalog() },
                 onShowMessage = showSnackbar,
               )
             }

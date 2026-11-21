@@ -14,8 +14,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
     BehaviorEventEntity::class,
     ScanHistoryEntity::class,
     WhitelistedAppEntity::class,
+    ThreatCatalogEntity::class,
   ],
-  version = 3,
+  version = 4,
   exportSchema = false,
 )
 abstract class SentinelaDatabase : RoomDatabase() {
@@ -64,6 +65,37 @@ abstract class SentinelaDatabase : RoomDatabase() {
         }
       }
 
+    val MIGRATION_3_4 =
+      object : Migration(3, 4) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+          db.execSQL("ALTER TABLE `scan_audits` ADD COLUMN `threatCategory` TEXT NOT NULL DEFAULT 'SEGURO'")
+          db.execSQL("ALTER TABLE `scan_audits` ADD COLUMN `isPlayStoreApp` INTEGER NOT NULL DEFAULT 0")
+          db.execSQL("ALTER TABLE `scan_audits` ADD COLUMN `hasAccessibilityAbuse` INTEGER NOT NULL DEFAULT 0")
+          db.execSQL("ALTER TABLE `scan_audits` ADD COLUMN `hasPermissionAbuse` INTEGER NOT NULL DEFAULT 0")
+          db.execSQL("ALTER TABLE `scan_audits` ADD COLUMN `hasHiddenCommunication` INTEGER NOT NULL DEFAULT 0")
+          db.execSQL("ALTER TABLE `scan_audits` ADD COLUMN `matchedThreatName` TEXT NOT NULL DEFAULT ''")
+          db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `threat_catalog` (
+              `threatKey` TEXT NOT NULL PRIMARY KEY,
+              `name` TEXT NOT NULL,
+              `threatType` TEXT NOT NULL,
+              `severityScore` INTEGER NOT NULL,
+              `packagePatterns` TEXT NOT NULL,
+              `sha256Signatures` TEXT NOT NULL,
+              `permissionSignature` TEXT NOT NULL,
+              `indicatorTokens` TEXT NOT NULL,
+              `descriptionPt` TEXT NOT NULL,
+              `recommendationPt` TEXT NOT NULL,
+              `sourceReference` TEXT NOT NULL,
+              `isActive` INTEGER NOT NULL,
+              `updatedAt` INTEGER NOT NULL
+            )
+            """.trimIndent()
+          )
+        }
+      }
+
     fun getInstance(context: Context): SentinelaDatabase {
       return INSTANCE
         ?: synchronized(this) {
@@ -73,7 +105,7 @@ abstract class SentinelaDatabase : RoomDatabase() {
                 SentinelaDatabase::class.java,
                 "sentinela_security.db",
               )
-              .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+              .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
               .build()
               .also { INSTANCE = it }
         }

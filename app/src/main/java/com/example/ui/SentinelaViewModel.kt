@@ -15,11 +15,13 @@ import com.example.data.local.BehaviorEventEntity
 import com.example.data.local.CertificateRuleEntity
 import com.example.data.local.ScanAuditEntity
 import com.example.data.local.ScanHistoryEntity
-import com.example.data.local.SecurityVerdict
+import com.example.data.local.ThreatCatalogEntity
+import com.example.data.local.ThreatType
 import com.example.data.local.TrustStatus
 import com.example.data.local.WhitelistedAppEntity
 import com.example.data.preferences.SecuritySettings
 import com.example.security.ApkInspectionReport
+import com.example.service.AntivirusUpdateScheduler
 import com.example.service.MonitorServiceState
 import com.example.service.SecurityMonitorService
 import com.example.service.ServiceMonitorTelemetry
@@ -27,7 +29,6 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -39,8 +40,9 @@ enum class BehaviorFilter(val labelPt: String) {
   TODOS("Todos"),
   ALTO_RISCO("Risco Alto"),
   SUSPEITOS("Atenção"),
-  SEGUROS("Seguros"),
+  PLAY_STORE_ALERTAS("Play Store c/ Alerta"),
   SIDELOAD("Fora da Loja"),
+  SEGUROS("Seguros"),
   LISTA_BRANCA("Confiáveis"),
 }
 
@@ -86,6 +88,7 @@ sealed interface AuditDetailUiState {
 data class SentinelaUiState(
   val isScanningDevice: Boolean = false,
   val isInspectingApk: Boolean = false,
+  val isUpdatingAntivirus: Boolean = false,
   val latestApkReport: ApkInspectionReport? = null,
   val apkErrorMessage: String? = null,
   val usageAccessGranted: Boolean = false,
@@ -96,6 +99,7 @@ data class SentinelaUiState(
   val scanHistory: List<ScanHistoryEntity> = emptyList(),
   val whitelistedApps: List<WhitelistedAppEntity> = emptyList(),
   val whitelistedPackageNames: Set<String> = emptySet(),
+  val threatCatalog: List<ThreatCatalogEntity> = emptyList(),
   val threatStats: ThreatStatsSummary = ThreatStatsSummary(),
   val certificateSummaries: List<CertificateSummary> = emptyList(),
   val settings: SecuritySettings = SecuritySettings(),
@@ -113,6 +117,7 @@ class SentinelaViewModel(application: Application) : AndroidViewModel(applicatio
 
   private val _isScanningDevice = MutableStateFlow(false)
   private val _isInspectingApk = MutableStateFlow(false)
+  private val _isUpdatingAntivirus = MutableStateFlow(false)
   private val _latestApkReport = MutableStateFlow<ApkInspectionReport?>(null)
   private val _apkErrorMessage = MutableStateFlow<String?>(null)
   private val _usageAccessGranted = MutableStateFlow(false)
@@ -148,13 +153,14 @@ class SentinelaViewModel(application: Application) : AndroidViewModel(applicatio
 
   private val statusStateFlow =
     combine(
-      _isScanningDevice,
-      _isInspectingApk,
+      combine(_isScanningDevice, _isInspectingApk, _isUpdatingAntivirus) { scanning, inspecting, updating ->
+        Triple(scanning, inspecting, updating)
+      },
       _latestApkReport,
       _apkErrorMessage,
       _usageAccessGranted,
-    ) { scanning, inspecting, report, error, usageGranted ->
-      StatusBundle(scanning, inspecting, report, error, usageGranted)
+    ) { (scanning, inspecting, updating), report, error, usageGranted ->
+      StatusBundle(scanning, inspecting, updating, report, error, usageGranted)
     }
 
   private val systemStateFlow =
@@ -163,8 +169,9 @@ class SentinelaViewModel(application: Application) : AndroidViewModel(applicatio
       MonitorServiceState.state,
       repository.threatStatsSummary,
       repository.whitelistedApps,
-    ) { notifGranted, telemetry, stats, whitelist ->
-      SystemBundle(notifGranted, telemetry, stats, whitelist)
+      repository.threatCatalog,
+    ) { notifGranted, telemetry, stats, whitelist, catalog ->
+      SystemBundle(notifGranted, telemetry, stats, whitelist, catalog)
     }
 
   val uiState: StateFlow<SentinelaUiState> =
@@ -179,6 +186,7 @@ class SentinelaViewModel(application: Application) : AndroidViewModel(applicatio
         SentinelaUiState(
           isScanningDevice = status.isScanningDevice,
           isInspectingApk = status.isInspectingApk,
+          isUpdatingAntivirus = status.isUpdatingAntivirus,
           latestApkReport = status.latestApkReport,
           apkErrorMessage = status.apkErrorMessage,
           usageAccessGranted = status.usageAccessGranted,
@@ -189,6 +197,7 @@ class SentinelaViewModel(application: Application) : AndroidViewModel(applicatio
           scanHistory = history,
           whitelistedApps = sysState.whitelistedApps,
           whitelistedPackageNames = sysState.whitelistedApps.map { it.packageName }.toSet(),
+          threatCatalog = sysState.threatCatalog,
           threatStats = sysState.threatStats,
           certificateSummaries = summaries,
           settings = base.settings,
@@ -210,7 +219,14 @@ class SentinelaViewModel(application: Application) : AndroidViewModel(applicatio
   init {
     refreshSystemPermissionsStatus()
     viewModelScope.launch {
+      repository.ensureCatalogSeeded()
       val currentSettings = repository.settings.first()
+      runCatching {
+        AntivirusUpdateScheduler.syncSchedule(
+          getApplication(),
+          currentSettings.autoAntivirusUpdatesEnabled,
+        )
+      }
       if (currentSettings.realTimeMonitorEnabled) {
         runCatching { SecurityMonitorService.start(getApplication()) }
       }
@@ -242,6 +258,33 @@ class SentinelaViewModel(application: Application) : AndroidViewModel(applicatio
       } finally {
         _isScanningDevice.value = false
       }
+    }
+  }
+
+  fun updateAntivirusNow(onCompleted: ((Boolean, String) -> Unit)? = null) {
+    if (_isUpdatingAntivirus.value) return
+    viewModelScope.launch {
+      _isUpdatingAntivirus.value = true
+      try {
+        val result = repository.updateAntivirusDefinitionsFromGoogle(isAutomatic = false)
+        result
+          .onSuccess { update -> onCompleted?.invoke(true, update.summaryMessagePt) }
+          .onFailure { err ->
+            onCompleted?.invoke(
+              false,
+              err.message ?: "Não foi possível atualizar a partir do servidor do Google.",
+            )
+          }
+      } finally {
+        _isUpdatingAntivirus.value = false
+      }
+    }
+  }
+
+  fun toggleAutoAntivirusUpdates(enabled: Boolean) {
+    viewModelScope.launch {
+      repository.setAutoAntivirusUpdatesEnabled(enabled)
+      runCatching { AntivirusUpdateScheduler.syncSchedule(getApplication(), enabled) }
     }
   }
 
@@ -407,6 +450,44 @@ class SentinelaViewModel(application: Application) : AndroidViewModel(applicatio
     viewModelScope.launch { repository.clearWhitelist() }
   }
 
+  fun addCustomThreatToCatalog(
+    name: String,
+    threatType: ThreatType,
+    packagePattern: String,
+    sha256Signature: String,
+    descriptionPt: String,
+  ) {
+    if (name.isBlank()) return
+    viewModelScope.launch {
+      val key = "CUSTOM_${System.currentTimeMillis()}"
+      repository.addCustomThreatCatalogEntry(
+        ThreatCatalogEntity(
+          threatKey = key,
+          name = name.trim(),
+          threatType = threatType.name,
+          severityScore = 85,
+          packagePatterns = packagePattern.trim(),
+          sha256Signatures = sha256Signature.trim(),
+          permissionSignature = "",
+          indicatorTokens = "",
+          descriptionPt =
+            descriptionPt.trim().ifBlank { "Regra personalizada adicionada pelo usuário." },
+          recommendationPt = "Evite instalar ou desinstale o pacote correspondente.",
+          sourceReference = "Regra do Usuário",
+        )
+      )
+      repository.scanAllInstalledApps()
+    }
+  }
+
+  fun deleteThreatFromCatalog(threatKey: String) {
+    viewModelScope.launch { repository.deleteThreatCatalogEntry(threatKey) }
+  }
+
+  fun restoreDefaultThreatCatalog() {
+    viewModelScope.launch { repository.restoreDefaultCatalog() }
+  }
+
   fun observeAudit(id: Long): StateFlow<ScanAuditEntity?> {
     return repository
       .observeAuditById(id)
@@ -512,6 +593,7 @@ class SentinelaViewModel(application: Application) : AndroidViewModel(applicatio
   private data class StatusBundle(
     val isScanningDevice: Boolean,
     val isInspectingApk: Boolean,
+    val isUpdatingAntivirus: Boolean,
     val latestApkReport: ApkInspectionReport?,
     val apkErrorMessage: String?,
     val usageAccessGranted: Boolean,
@@ -530,5 +612,6 @@ class SentinelaViewModel(application: Application) : AndroidViewModel(applicatio
     val serviceTelemetry: ServiceMonitorTelemetry,
     val threatStats: ThreatStatsSummary,
     val whitelistedApps: List<WhitelistedAppEntity>,
+    val threatCatalog: List<ThreatCatalogEntity>,
   )
 }

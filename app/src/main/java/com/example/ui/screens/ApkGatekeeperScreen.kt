@@ -59,6 +59,7 @@ import com.example.ui.SentinelaUiState
 import com.example.ui.components.FingerprintMonospaceBox
 import com.example.ui.components.RiskScoreGauge
 import com.example.ui.components.TechnicalDetailsExpandable
+import com.example.ui.components.ThreatSignalBadgesRow
 import com.example.ui.components.VerdictBadge
 import com.example.ui.components.formatDateOnlyPt
 import com.example.ui.components.formatTimestampPt
@@ -385,6 +386,8 @@ private fun GatekeeperReportCard(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
+          Spacer(Modifier.height(6.dp))
+          ThreatSignalBadgesRow(audit = report.audit)
         }
       }
 
@@ -460,6 +463,20 @@ private fun GatekeeperReportCard(
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (report.fileSha256.isNotBlank()) {
+          Text(
+            text = "SHA-256 do arquivo .APK: ${report.fileSha256}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
+        if (report.staticIndicators.isNotEmpty()) {
+          Text(
+            text = "Indicadores estáticos detectados: ${report.staticIndicators.joinToString()}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+          )
+        }
         if (report.dangerousPermissions.isNotEmpty()) {
           Text(text = "Permissões solicitadas", style = MaterialTheme.typography.titleSmall)
           FlowRow(

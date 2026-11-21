@@ -59,10 +59,12 @@ import com.example.ui.AuditDetailUiState
 import com.example.ui.components.FingerprintMonospaceBox
 import com.example.ui.components.RiskScoreGauge
 import com.example.ui.components.TechnicalDetailsExpandable
+import com.example.ui.components.ThreatSignalBadgesRow
 import com.example.ui.components.VerdictBadge
 import com.example.ui.components.formatDateOnlyPt
 import com.example.ui.components.formatTimestampPt
 import com.example.ui.components.friendlyInstallerSource
+import com.example.ui.components.friendlyThreatClassificationLabel
 import com.example.ui.components.friendlyVerdictExplanation
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -219,6 +221,8 @@ fun AppDetailScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                       )
+                      Spacer(Modifier.height(8.dp))
+                      ThreatSignalBadgesRow(audit = audit)
                     }
                   }
 
@@ -227,6 +231,41 @@ fun AppDetailScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                   )
+
+                  if (audit.matchedThreatName.isNotBlank()) {
+                    Surface(
+                      color = MaterialTheme.colorScheme.errorContainer,
+                      shape = RoundedCornerShape(10.dp),
+                      modifier = Modifier.fillMaxWidth().testTag("detail_matched_threat_banner"),
+                    ) {
+                      Text(
+                        text =
+                          "Correspondência no Banco de Ameaças: ${audit.matchedThreatName} (${friendlyThreatClassificationLabel(audit.threatCategory)})",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(10.dp),
+                      )
+                    }
+                  } else if (audit.hasAccessibilityAbuse || audit.hasPermissionAbuse || audit.hasHiddenCommunication) {
+                    val reasons =
+                      buildList {
+                        if (audit.hasAccessibilityAbuse) add("Uso de Acessibilidade (leitura de tela/cliques)")
+                        if (audit.hasPermissionAbuse) add("Abuso de permissões fora da função do app")
+                        if (audit.hasHiddenCommunication) add("Comunicação oculta em segundo plano")
+                      }.joinToString(" • ")
+                    Surface(
+                      color = MaterialTheme.colorScheme.tertiaryContainer,
+                      shape = RoundedCornerShape(10.dp),
+                      modifier = Modifier.fillMaxWidth().testTag("detail_deep_threat_banner"),
+                    ) {
+                      Text(
+                        text = "Sinais detectados: $reasons",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.padding(10.dp),
+                      )
+                    }
+                  }
                 }
               }
             }

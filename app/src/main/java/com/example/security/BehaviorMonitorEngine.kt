@@ -1,5 +1,6 @@
 package com.example.security
 
+import android.Manifest
 import android.app.AppOpsManager
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
@@ -11,9 +12,11 @@ import android.content.pm.PackageManager
 import android.net.TrafficStats
 import android.os.Build
 import android.os.Process
+import android.provider.Settings
 import com.example.data.local.BehaviorEventEntity
 import com.example.data.local.EventSeverity
 import com.example.data.local.ScanAuditEntity
+import com.example.data.local.ThreatCatalogEntity
 import com.example.data.local.TrustStatus
 import com.example.data.preferences.SecuritySettings
 import kotlinx.coroutines.Dispatchers
@@ -47,41 +50,67 @@ class BehaviorMonitorEngine(private val context: Context) {
     return mode == AppOpsManager.MODE_ALLOWED
   }
 
+  private fun queryRecentLaunchCounts(hasUsage: Boolean): Map<String, Int> {
+    if (!hasUsage) return emptyMap()
+    return try {
+      val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+      val end = System.currentTimeMillis()
+      val start = end - 30 * 60 * 1000L
+      val usageEvents = usm.queryEvents(start, end)
+      val event = UsageEvents.Event()
+      val foregroundEventType =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) UsageEvents.Event.ACTIVITY_RESUMED
+        else @Suppress("DEPRECATION") UsageEvents.Event.MOVE_TO_FOREGROUND
+      val counts = mutableMapOf<String, Int>()
+      while (usageEvents.hasNextEvent()) {
+        usageEvents.getNextEvent(event)
+        if (event.eventType == foregroundEventType && event.packageName != null) {
+          val pkg = event.packageName
+          if (pkg != context.packageName) {
+            counts[pkg] = (counts[pkg] ?: 0) + 1
+          }
+        }
+      }
+      counts
+    } catch (_: Exception) {
+      emptyMap()
+    }
+  }
+
+  private fun resolveEnabledAccessibilityPackages(): Set<String> {
+    return try {
+      val enabled =
+        Settings.Secure.getString(
+          context.contentResolver,
+          Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+        ) ?: return emptySet()
+      enabled
+        .split(":")
+        .mapNotNull { component ->
+          component.substringBefore('/', "").trim().takeIf { it.isNotEmpty() }
+        }
+        .toSet()
+    } catch (_: Exception) {
+      emptySet()
+    }
+  }
+
   suspend fun collectRealTimeTelemetry(
     installedAudits: List<ScanAuditEntity>,
     whitelistedPackages: Set<String> = emptySet(),
   ): BehavioralTelemetryResult =
     withContext(Dispatchers.IO) {
       val hasUsage = hasUsageStatsPermission()
-      val launchCounts = mutableMapOf<String, Int>()
+      val launchCounts = queryRecentLaunchCounts(hasUsage)
+      val enabledAccessibility = resolveEnabledAccessibilityPackages()
       val detectedEvents = mutableListOf<BehaviorEventEntity>()
       val auditByPkg =
         installedAudits
           .filter { it.packageName !in whitelistedPackages }
           .associateBy { it.packageName }
 
-      // 1. Real-time UsageStatsManager activity transition analysis (last 30 minutes)
+      // 1. Rapid activity hijacking / excessive foreground bursts
       if (hasUsage) {
-        val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-        val end = System.currentTimeMillis()
-        val start = end - 30 * 60 * 1000L
-        val usageEvents = usm.queryEvents(start, end)
-        val event = UsageEvents.Event()
-        val foregroundEventType =
-          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) UsageEvents.Event.ACTIVITY_RESUMED
-          else @Suppress("DEPRECATION") UsageEvents.Event.MOVE_TO_FOREGROUND
-
-        while (usageEvents.hasNextEvent()) {
-          usageEvents.getNextEvent(event)
-          if (event.eventType == foregroundEventType && event.packageName != null) {
-            val pkg = event.packageName
-            if (pkg != context.packageName) {
-              launchCounts[pkg] = (launchCounts[pkg] ?: 0) + 1
-            }
-          }
-        }
-
-        // Detect rapid activity hijacking / excessive foreground bursts
         launchCounts.forEach { (pkg, count) ->
           val audit = auditByPkg[pkg]
           if (count >= 12 && audit != null && !audit.isSystemApp) {
@@ -102,7 +131,7 @@ class BehaviorMonitorEngine(private val context: Context) {
         }
       }
 
-      // 2. Real-time TrafficStats outbound/inbound exfiltration ratio check
+      // 2. Real-time Accessibility Service active check & Silent Background Exfiltration check
       val pm = context.packageManager
       installedAudits.forEach { audit ->
         if (
@@ -110,6 +139,20 @@ class BehaviorMonitorEngine(private val context: Context) {
             audit.packageName != context.packageName &&
             audit.packageName !in whitelistedPackages
         ) {
+          if (audit.packageName in enabledAccessibility) {
+            detectedEvents +=
+              BehaviorEventEntity(
+                packageName = audit.packageName,
+                appName = audit.appName,
+                eventType = "ACCESSIBILITY_ACTIVE",
+                severity = EventSeverity.CRITICAL.name,
+                details =
+                  "Serviço de Acessibilidade ativo em segundo plano: este app pode ler sua tela e clicar em botões automaticamente.",
+                txBytes = audit.txBytes,
+                rxBytes = audit.rxBytes,
+              )
+          }
+
           val uid =
             try {
               pm.getApplicationInfo(audit.packageName, 0).uid
@@ -119,10 +162,26 @@ class BehaviorMonitorEngine(private val context: Context) {
           if (uid > 0) {
             val tx = TrafficStats.getUidTxBytes(uid).coerceAtLeast(0L)
             val rx = TrafficStats.getUidRxBytes(uid).coerceAtLeast(0L)
+            val twoMb = 2L * 1024L * 1024L
             val fiveMb = 5L * 1024L * 1024L
-            val isSideload =
-              audit.installerSource != "com.android.vending" && audit.installerSource != "Sistema Android"
-            if (tx > fiveMb && tx > (rx * 2 + 1024 * 1024) && (isSideload || audit.riskScore >= 30)) {
+            val launches = if (hasUsage) (launchCounts[audit.packageName] ?: 0) else -1
+            val originLabel =
+              if (audit.installerSource == "com.android.vending") "Google Play Store"
+              else "app fora da loja oficial"
+
+            if (tx >= twoMb && launches == 0) {
+              detectedEvents +=
+                BehaviorEventEntity(
+                  packageName = audit.packageName,
+                  appName = audit.appName,
+                  eventType = "NETWORK_ANOMALY",
+                  severity = EventSeverity.CRITICAL.name,
+                  details =
+                    "Comunicação oculta ($originLabel): enviou ${formatBytes(tx)} para fora sem você abrir o aplicativo.",
+                  txBytes = tx,
+                  rxBytes = rx,
+                )
+            } else if (tx > fiveMb && tx > (rx * 2 + 1_048_576L)) {
               detectedEvents +=
                 BehaviorEventEntity(
                   packageName = audit.packageName,
@@ -130,7 +189,7 @@ class BehaviorMonitorEngine(private val context: Context) {
                   eventType = "NETWORK_ANOMALY",
                   severity = EventSeverity.WARNING.name,
                   details =
-                    "Tráfego de saída elevado (${formatBytes(tx)} enviados vs ${formatBytes(rx)} recebidos) em app não verificado.",
+                    "Comunicação oculta ($originLabel): tráfego de saída elevado (${formatBytes(tx)} enviados vs ${formatBytes(rx)} recebidos).",
                   txBytes = tx,
                   rxBytes = rx,
                 )
@@ -149,11 +208,15 @@ class BehaviorMonitorEngine(private val context: Context) {
   suspend fun auditLauncherPackages(
     settings: SecuritySettings,
     whitelistedPackages: Set<String> = emptySet(),
+    catalogThreats: List<ThreatCatalogEntity> = emptyList(),
     trustLookup: suspend (String) -> TrustStatus,
     previousSigLookup: suspend (String) -> String?,
   ): List<ScanAuditEntity> =
     withContext(Dispatchers.IO) {
       val pm = context.packageManager
+      val hasUsage = hasUsageStatsPermission()
+      val launchCounts = queryRecentLaunchCounts(hasUsage)
+      val enabledAccessibility = resolveEnabledAccessibilityPackages()
       val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
       val resolveInfos =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -168,10 +231,14 @@ class BehaviorMonitorEngine(private val context: Context) {
 
       for (pkg in uniquePackages) {
         if (pkg == context.packageName || pkg in whitelistedPackages) continue
+        val launches = if (hasUsage) (launchCounts[pkg] ?: 0) else -1
         auditSingleInstalledPackage(
           packageName = pkg,
           sourceType = "INSTALLED_APP",
           settings = settings,
+          catalogThreats = catalogThreats,
+          enabledAccessibilityPackages = enabledAccessibility,
+          foregroundLaunchCount = launches,
           trustLookup = trustLookup,
           previousSigLookup = previousSigLookup,
         )?.let { results += it }
@@ -184,6 +251,9 @@ class BehaviorMonitorEngine(private val context: Context) {
     packageName: String,
     sourceType: String,
     settings: SecuritySettings,
+    catalogThreats: List<ThreatCatalogEntity> = emptyList(),
+    enabledAccessibilityPackages: Set<String> = resolveEnabledAccessibilityPackages(),
+    foregroundLaunchCount: Int = -1,
     trustLookup: suspend (String) -> TrustStatus,
     previousSigLookup: suspend (String) -> String?,
   ): ScanAuditEntity? =
@@ -191,6 +261,7 @@ class BehaviorMonitorEngine(private val context: Context) {
       val pm = context.packageManager
       val flags =
         PackageManager.GET_PERMISSIONS or
+          PackageManager.GET_SERVICES or
           if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             PackageManager.GET_SIGNING_CERTIFICATES
           } else {
@@ -221,6 +292,10 @@ class BehaviorMonitorEngine(private val context: Context) {
       val txBytes = if (uid > 0) TrafficStats.getUidTxBytes(uid).coerceAtLeast(0L) else 0L
       val rxBytes = if (uid > 0) TrafficStats.getUidRxBytes(uid).coerceAtLeast(0L) else 0L
 
+      val declaresAccessibilityService =
+        pkgInfo.services?.any { it.permission == Manifest.permission.BIND_ACCESSIBILITY_SERVICE } == true
+      val isAccessibilityEnabled = packageName in enabledAccessibilityPackages
+
       val installerSource = resolveInstallerSource(pm, packageName, isSystem)
       val sigAnalysis = SignatureVerifier.analyze(pkgInfo)
       val trustStatus =
@@ -243,6 +318,13 @@ class BehaviorMonitorEngine(private val context: Context) {
             installedSignatureSha256 = previousSig,
             certificateTrustStatus = trustStatus,
             settings = settings,
+            appName = appName,
+            declaresAccessibilityService = declaresAccessibilityService,
+            isAccessibilityServiceEnabled = isAccessibilityEnabled,
+            txBytes = txBytes,
+            rxBytes = rxBytes,
+            foregroundLaunchCount = foregroundLaunchCount,
+            catalogThreats = catalogThreats,
           )
         )
 
@@ -271,6 +353,12 @@ class BehaviorMonitorEngine(private val context: Context) {
         rxBytes = rxBytes,
         findingsSummary = riskResult.findings.joinToString("\n• ", prefix = "• "),
         dangerousPermissions = riskResult.dangerousPermissions.joinToString(","),
+        threatCategory = riskResult.threatCategory.name,
+        isPlayStoreApp = riskResult.isPlayStoreApp,
+        hasAccessibilityAbuse = riskResult.hasAccessibilityAbuse,
+        hasPermissionAbuse = riskResult.hasPermissionAbuse,
+        hasHiddenCommunication = riskResult.hasHiddenCommunication,
+        matchedThreatName = riskResult.matchedThreatName,
       )
     }
 

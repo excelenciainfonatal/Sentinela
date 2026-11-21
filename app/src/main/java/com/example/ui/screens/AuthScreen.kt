@@ -166,18 +166,16 @@ fun AuthScreen(
     }
   }
 
+  val bg = MaterialTheme.colorScheme.background
+  val surfaceContainer = MaterialTheme.colorScheme.surfaceContainer
+
   Box(
     modifier =
       modifier
         .fillMaxSize()
         .background(
           Brush.verticalGradient(
-            colors =
-              listOf(
-                MaterialTheme.colorScheme.background,
-                Color(0xFF0E1A2A),
-                MaterialTheme.colorScheme.background,
-              )
+            colors = listOf(bg, surfaceContainer, bg)
           )
         )
         .safeDrawingPadding(),
@@ -221,9 +219,9 @@ fun AuthScreen(
                   Brush.verticalGradient(
                     colors =
                       listOf(
-                        Color(0xC20A1017),
-                        Color(0xEB0A1017),
-                        Color(0xFA0A1017),
+                        bg.copy(alpha = 0.78f),
+                        surfaceContainer.copy(alpha = 0.92f),
+                        bg.copy(alpha = 0.98f),
                       )
                   )
                 )
@@ -252,7 +250,7 @@ fun AuthScreen(
             Text(
               text = "Proteja seu celular com o Sentinela",
               style = MaterialTheme.typography.headlineSmall,
-              color = Color.White,
+              color = MaterialTheme.colorScheme.onSurface,
               textAlign = TextAlign.Center,
             )
             Spacer(Modifier.height(8.dp))
@@ -260,7 +258,7 @@ fun AuthScreen(
               text =
                 "Identifique aplicativos suspeitos de forma simples e mantenha seus dados seguros na sua conta Google.",
               style = MaterialTheme.typography.bodyMedium,
-              color = Color(0xFFCBD5E1),
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
               textAlign = TextAlign.Center,
             )
           }

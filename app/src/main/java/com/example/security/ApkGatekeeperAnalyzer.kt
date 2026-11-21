@@ -1,5 +1,6 @@
 package com.example.security
 
+import android.Manifest
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
@@ -8,9 +9,11 @@ import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
 import com.example.data.local.ScanAuditEntity
+import com.example.data.local.ThreatCatalogEntity
 import com.example.data.local.TrustStatus
 import com.example.data.preferences.SecuritySettings
 import java.io.File
+import java.security.MessageDigest
 import java.util.zip.ZipFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -24,6 +27,8 @@ data class ApkInspectionReport(
   val findings: List<String>,
   val dangerousPermissions: List<String>,
   val signatureAnalysis: SignatureAnalysis,
+  val fileSha256: String = "",
+  val staticIndicators: List<String> = emptyList(),
 )
 
 class ApkGatekeeperAnalyzer(private val context: Context) {
@@ -31,6 +36,7 @@ class ApkGatekeeperAnalyzer(private val context: Context) {
   suspend fun inspectApkUri(
     uri: Uri,
     settings: SecuritySettings,
+    catalogThreats: List<ThreatCatalogEntity> = emptyList(),
     trustLookup: suspend (String) -> TrustStatus,
     installedSigLookup: suspend (String) -> String?,
   ): Result<ApkInspectionReport> =
@@ -46,9 +52,12 @@ class ApkGatekeeperAnalyzer(private val context: Context) {
           return@withContext Result.failure(IllegalArgumentException("O arquivo selecionado está vazio."))
         }
 
+        val fileSha256 = computeFileSha256(tempApk)
+
         val pm = context.packageManager
         val flags =
           PackageManager.GET_PERMISSIONS or
+            PackageManager.GET_SERVICES or
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
               PackageManager.GET_SIGNING_CERTIFICATES
             } else {
@@ -81,19 +90,39 @@ class ApkGatekeeperAnalyzer(private val context: Context) {
         val isDebuggable =
           ((pkgInfo.applicationInfo?.flags ?: 0) and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         val permissions = pkgInfo.requestedPermissions?.toList().orEmpty()
+        val declaresAccessibilityService =
+          pkgInfo.services?.any { it.permission == Manifest.permission.BIND_ACCESSIBILITY_SERVICE } == true
 
-        // Inspect static archive entries without loading or executing any code
+        // Inspect static archive entries & bounded DEX strings without loading or executing any code
         var dexCount = 0
         val nativeAbis = mutableSetOf<String>()
+        val staticIndicators = mutableSetOf<String>()
+        var bytesScannedForStrings = 0L
+        val maxDexScanBytes = 4L * 1024L * 1024L
+
         ZipFile(tempApk).use { zip ->
           val entries = zip.entries()
           while (entries.hasMoreElements()) {
-            val name = entries.nextElement().name
+            val entry = entries.nextElement()
+            val name = entry.name
+            val lower = name.lowercase()
             if (name.startsWith("classes") && name.endsWith(".dex")) {
               dexCount++
+              if (bytesScannedForStrings < maxDexScanBytes) {
+                val remaining = (maxDexScanBytes - bytesScannedForStrings).toInt().coerceAtMost(2 * 1024 * 1024)
+                val readBytes = zip.getInputStream(entry).use { it.readNBytesCompat(remaining) }
+                bytesScannedForStrings += readBytes.size
+                val contentText = String(readBytes, Charsets.ISO_8859_1)
+                scanStaticIndicators(contentText, staticIndicators)
+              }
             } else if (name.startsWith("lib/") && name.endsWith(".so")) {
               val parts = name.split("/")
               if (parts.size >= 2) nativeAbis += parts[1]
+              if (lower.contains("triada")) staticIndicators += "libtriada.so"
+            } else if ((lower.startsWith("assets/") || lower.startsWith("res/raw/")) && lower.endsWith(".apk")) {
+              staticIndicators += "nested_apk_in_assets"
+            } else if ((lower.startsWith("assets/") || lower.startsWith("res/raw/")) && lower.endsWith(".jar")) {
+              staticIndicators += "nested_jar_payload"
             }
           }
         }
@@ -114,6 +143,7 @@ class ApkGatekeeperAnalyzer(private val context: Context) {
         }
         if (dexCount == 0) {
           extraScore += 25
+          staticIndicators += "missing_classes_dex"
           extraFindings += "Nenhum classes.dex encontrado no pacote"
         }
 
@@ -132,6 +162,11 @@ class ApkGatekeeperAnalyzer(private val context: Context) {
               settings = settings,
               behavioralAnomalyScore = extraScore,
               behavioralFindings = extraFindings,
+              appName = appName,
+              declaresAccessibilityService = declaresAccessibilityService,
+              staticIndicators = staticIndicators.toList(),
+              fileSha256 = fileSha256,
+              catalogThreats = catalogThreats,
             )
           )
 
@@ -161,6 +196,12 @@ class ApkGatekeeperAnalyzer(private val context: Context) {
             rxBytes = 0L,
             findingsSummary = riskResult.findings.joinToString("\n• ", prefix = "• "),
             dangerousPermissions = riskResult.dangerousPermissions.joinToString(","),
+            threatCategory = riskResult.threatCategory.name,
+            isPlayStoreApp = false,
+            hasAccessibilityAbuse = riskResult.hasAccessibilityAbuse,
+            hasPermissionAbuse = riskResult.hasPermissionAbuse,
+            hasHiddenCommunication = riskResult.hasHiddenCommunication,
+            matchedThreatName = riskResult.matchedThreatName,
           )
 
         Result.success(
@@ -173,6 +214,8 @@ class ApkGatekeeperAnalyzer(private val context: Context) {
             findings = riskResult.findings,
             dangerousPermissions = riskResult.dangerousPermissions,
             signatureAnalysis = sigAnalysis,
+            fileSha256 = fileSha256,
+            staticIndicators = staticIndicators.sorted(),
           )
         )
       } catch (e: Exception) {
@@ -181,6 +224,57 @@ class ApkGatekeeperAnalyzer(private val context: Context) {
         if (tempApk.exists()) tempApk.delete()
       }
     }
+
+  private fun scanStaticIndicators(text: String, out: MutableSet<String>) {
+    if (RAW_IP_URL_REGEX.containsMatchIn(text)) {
+      out += "raw_ip_http_endpoint"
+    }
+    if (text.contains(".onion", ignoreCase = true)) {
+      out += "onion_tor_c2"
+    }
+    if (text.contains("api.telegram.org/bot", ignoreCase = true)) {
+      out += "api.telegram.org/bot"
+    }
+    if (text.contains("discord.com/api/webhooks", ignoreCase = true)) {
+      out += "discord.com/api/webhooks"
+    }
+    if (text.contains("DexClassLoader") || text.contains("InMemoryDexClassLoader")) {
+      out += "DexClassLoader"
+    }
+    if (text.contains("performGlobalAction") && text.contains("AccessibilityNodeInfo")) {
+      out += "performGlobalAction"
+      out += "AccessibilityNodeInfo"
+    }
+  }
+
+  private fun computeFileSha256(file: File): String {
+    return runCatching {
+      val digest = MessageDigest.getInstance("SHA-256")
+      val buffer = ByteArray(8192)
+      file.inputStream().use { input ->
+        var read = input.read(buffer)
+        while (read > 0) {
+          digest.update(buffer, 0, read)
+          read = input.read(buffer)
+        }
+      }
+      digest.digest().joinToString(":") { "%02X".format(it) }
+    }.getOrDefault("")
+  }
+
+  private fun java.io.InputStream.readNBytesCompat(maxBytes: Int): ByteArray {
+    val buffer = ByteArray(8192)
+    val out = java.io.ByteArrayOutputStream()
+    var total = 0
+    while (total < maxBytes) {
+      val toRead = minOf(buffer.size, maxBytes - total)
+      val count = read(buffer, 0, toRead)
+      if (count <= 0) break
+      out.write(buffer, 0, count)
+      total += count
+    }
+    return out.toByteArray()
+  }
 
   private fun getInstalledPackageSha256(pm: PackageManager, packageName: String): String? {
     return try {
@@ -214,5 +308,10 @@ class ApkGatekeeperAnalyzer(private val context: Context) {
       }
     }
     return result
+  }
+
+  companion object {
+    private val RAW_IP_URL_REGEX =
+      Regex("""https?://(?!127\.0\.0\.1|10\.0\.2\.2|192\.168\.)\d{1,3}(?:\.\d{1,3}){3}""")
   }
 }

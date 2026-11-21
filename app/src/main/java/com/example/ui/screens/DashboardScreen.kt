@@ -30,8 +30,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AdminPanelSettings
-import androidx.compose.material.icons.filled.Apps
-import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudSync
@@ -39,6 +37,7 @@ import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.GppBad
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.NotificationsActive
@@ -90,6 +89,7 @@ import com.example.data.local.SecurityVerdict
 import com.example.data.local.TrustStatus
 import com.example.ui.CloudSyncUiState
 import com.example.ui.SentinelaUiState
+import com.example.ui.components.ThreatSignalBadgesRow
 import com.example.ui.components.VerdictBadge
 import com.example.ui.components.formatTimestampPt
 import com.example.ui.components.friendlyInstallerSource
@@ -100,6 +100,8 @@ fun DashboardScreen(
   cloudSyncState: CloudSyncUiState,
   onPickApk: () -> Unit,
   onScanNow: () -> Unit,
+  onUpdateAntivirusNow: () -> Unit,
+  onToggleAutoAntivirusUpdates: (Boolean) -> Unit,
   onSyncCloud: () -> Unit,
   onRestoreCloud: () -> Unit,
   onToggleCloudAutoSync: (Boolean) -> Unit,
@@ -120,6 +122,7 @@ fun DashboardScreen(
   onNavigateToSignatures: (alertsOnly: Boolean) -> Unit,
   onNavigateToHistory: () -> Unit,
   onNavigateToWhitelist: () -> Unit,
+  onNavigateToThreatCatalog: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
   val listState = rememberLazyListState()
@@ -164,10 +167,12 @@ fun DashboardScreen(
       contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
       verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-      // 1. Calm, Friendly Hero Protection Card
+      // 1. Real-Time Security Status Hero Card with 'Sistema Protegido' Badge
       item(key = "dash_hero") {
         HeroProtectionCard(
           monitorActive = uiState.settings.realTimeMonitorEnabled,
+          serviceRunning = uiState.serviceTelemetry.isServiceRunning,
+          verifiedInSession = uiState.serviceTelemetry.packagesVerifiedInSession,
           protectionScore = protectionScore,
           blockedCount = blockedCount,
           suspiciousCount = suspiciousCount,
@@ -178,8 +183,8 @@ fun DashboardScreen(
         )
       }
 
-      // 2. Simple 3-Column App Status Overview
-      item(key = "dash_overview") {
+      // 2. Primary Summary Cards: 'Apps Analisados' & 'Ameaças Bloqueadas'
+      item(key = "dash_summary_cards") {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
           Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -187,32 +192,53 @@ fun DashboardScreen(
             modifier = Modifier.fillMaxWidth(),
           ) {
             Text(
-              text = "Resumo dos seus aplicativos",
+              text = "Resumo de Segurança",
               style = MaterialTheme.typography.titleLarge,
             )
             TextButton(
               onClick = { onNavigateToCatalog(AppsCatalogFilter.TODOS) },
               modifier = Modifier.testTag("dashboard_view_all_apps_btn"),
             ) {
-              Text("Ver todos (${stats.totalAppsAudited})")
+              Text("Ver todos")
             }
           }
 
           Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            SummaryMetricCard(
+              title = "Apps Analisados",
+              value = "${stats.totalAppsAudited}",
+              subtitle = "$authorizedCount seguro(s)",
+              icon = Icons.Filled.Security,
+              accent = MaterialTheme.colorScheme.primary,
+              containerColor = MaterialTheme.colorScheme.surfaceContainer,
+              onClick = { onNavigateToCatalog(AppsCatalogFilter.TODOS) },
+              modifier = Modifier.weight(1f).testTag("summary_card_apps_analyzed"),
+            )
+            SummaryMetricCard(
+              title = "Ameaças Bloqueadas",
+              value = "$blockedCount",
+              subtitle = if (blockedCount > 0) "Toque para revisar" else "Nenhuma ameaça",
+              icon = Icons.Filled.GppBad,
+              accent =
+                if (blockedCount > 0) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.secondary,
+              containerColor = MaterialTheme.colorScheme.surfaceContainer,
+              onClick = { onNavigateToCatalog(AppsCatalogFilter.BLOQUEADOS) },
+              modifier = Modifier.weight(1f).testTag("summary_card_threats_blocked"),
+            )
+          }
+
+          // Clean secondary row for Attention, Whitelist & History
+          Row(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier.fillMaxWidth(),
           ) {
-            StatusTileCard(
-              title = "Seguros",
-              count = authorizedCount,
-              icon = Icons.Filled.VerifiedUser,
-              accent = MaterialTheme.colorScheme.secondary,
-              onClick = { onNavigateToCatalog(AppsCatalogFilter.AUTORIZADOS) },
-              modifier = Modifier.weight(1f).testTag("dashboard_kpi_authorized"),
-            )
-            StatusTileCard(
-              title = "Atenção",
-              count = suspiciousCount,
+            CompactCategoryTile(
+              title = "Em Atenção",
+              value = "$suspiciousCount",
               icon = Icons.Filled.Warning,
               accent =
                 if (suspiciousCount > 0) MaterialTheme.colorScheme.tertiary
@@ -220,21 +246,60 @@ fun DashboardScreen(
               onClick = { onNavigateToCatalog(AppsCatalogFilter.SUSPEITOS) },
               modifier = Modifier.weight(1f).testTag("dashboard_btn_suspicious"),
             )
-            StatusTileCard(
-              title = "Risco Alto",
-              count = blockedCount,
-              icon = Icons.Filled.Block,
-              accent =
-                if (blockedCount > 0) MaterialTheme.colorScheme.error
-                else MaterialTheme.colorScheme.secondary,
-              onClick = { onNavigateToCatalog(AppsCatalogFilter.BLOQUEADOS) },
-              modifier = Modifier.weight(1f).testTag("dashboard_kpi_blocked"),
+            CompactCategoryTile(
+              title = "Confiáveis",
+              value = "${uiState.whitelistedApps.size}",
+              icon = Icons.Filled.CheckCircle,
+              accent = MaterialTheme.colorScheme.secondary,
+              onClick = onNavigateToWhitelist,
+              modifier = Modifier.weight(1f).testTag("dashboard_whitelist_card"),
+            )
+            CompactCategoryTile(
+              title = "Histórico",
+              value = "${uiState.scanHistory.size}",
+              icon = Icons.Filled.History,
+              accent = MaterialTheme.colorScheme.primary,
+              onClick = onNavigateToHistory,
+              modifier = Modifier.weight(1f).testTag("dashboard_history_card"),
             )
           }
+
+          // Deep Threat Analysis & Play Store Differentiation Card
+          DeepDetectionOverviewCard(
+            playStoreFlaggedCount = stats.playStoreFlaggedCount,
+            externalFlaggedCount = stats.externalFlaggedCount,
+            permissionAbuseCount = stats.permissionAbuseCount,
+            accessibilityRiskCount = stats.accessibilityRiskCount,
+            hiddenCommCount = stats.hiddenCommCount,
+            catalogEntriesCount = uiState.threatCatalog.size,
+            onFilterPlayStoreAlerts = { onNavigateToCatalog(AppsCatalogFilter.PLAY_STORE_ALERTAS) },
+            onFilterExternal = { onNavigateToCatalog(AppsCatalogFilter.EXTERNOS) },
+            onFilterAccessibility = { onNavigateToCatalog(AppsCatalogFilter.ACESSIBILIDADE) },
+            onFilterHiddenComm = { onNavigateToCatalog(AppsCatalogFilter.COMUNICACAO_OCULTA) },
+            onOpenThreatCatalog = onNavigateToThreatCatalog,
+          )
         }
       }
 
-      // 3. Flagged Apps Needing Attention (Only shown when something needs review)
+      // 2b. Trusted Google Server Antivirus Updates Card
+      item(key = "dash_antivirus_updates") {
+        AntivirusUpdatesCard(
+          catalogCount = uiState.threatCatalog.size,
+          isUpdating = uiState.isUpdatingAntivirus,
+          autoUpdateEnabled = uiState.settings.autoAntivirusUpdatesEnabled,
+          lastUpdateAt = uiState.settings.lastAntivirusUpdateAt,
+          versionLabel = uiState.settings.lastAntivirusUpdateVersion,
+          statusMessage = uiState.settings.lastAntivirusUpdateStatus,
+          sourceLabel = uiState.settings.lastAntivirusUpdateSource,
+          providerVerified = uiState.settings.lastAntivirusProviderVerified,
+          hadError = uiState.settings.lastAntivirusUpdateHadError,
+          onToggleAutoUpdate = onToggleAutoAntivirusUpdates,
+          onManualUpdate = onUpdateAntivirusNow,
+          onOpenThreatCatalog = onNavigateToThreatCatalog,
+        )
+      }
+
+      // 3. Flagged Apps Needing Attention
       if (flaggedApps.isNotEmpty()) {
         item(key = "dash_flagged_header") {
           Row(
@@ -257,8 +322,8 @@ fun DashboardScreen(
               runCatching { SecurityVerdict.valueOf(audit.verdict) }.getOrDefault(SecurityVerdict.SUSPEITO)
             }
           Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             shape = MaterialTheme.shapes.large,
             modifier =
               Modifier.fillMaxWidth()
@@ -288,6 +353,8 @@ fun DashboardScreen(
                   color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(6.dp))
+                ThreatSignalBadgesRow(audit = audit)
+                Spacer(Modifier.height(6.dp))
                 Text(
                   text = audit.findingsSummary.lineSequence().firstOrNull()?.removePrefix("• ") ?: "",
                   style = MaterialTheme.typography.bodyMedium,
@@ -303,36 +370,11 @@ fun DashboardScreen(
         }
       }
 
-      // 4. Two Clean Quick Shortcuts (Apps Confiáveis & Histórico)
-      item(key = "dash_shortcuts") {
-        Row(
-          horizontalArrangement = Arrangement.spacedBy(10.dp),
-          modifier = Modifier.fillMaxWidth(),
-        ) {
-          ShortcutActionCard(
-            title = "Apps Confiáveis",
-            subtitle = "${uiState.whitelistedApps.size} salvo(s)",
-            icon = Icons.Filled.CheckCircle,
-            accent = MaterialTheme.colorScheme.secondary,
-            onClick = onNavigateToWhitelist,
-            modifier = Modifier.weight(1f).testTag("dashboard_whitelist_card"),
-          )
-          ShortcutActionCard(
-            title = "Histórico",
-            subtitle = "${uiState.scanHistory.size} scan(s)",
-            icon = Icons.Filled.History,
-            accent = MaterialTheme.colorScheme.primary,
-            onClick = onNavigateToHistory,
-            modifier = Modifier.weight(1f).testTag("dashboard_history_card"),
-          )
-        }
-      }
-
-      // 5. Automatic Protection Card (Simple, non-technical)
+      // 4. Real-Time Automatic Protection Card
       item(key = "dash_realtime_card") {
         Card(
-          colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+          colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
           shape = MaterialTheme.shapes.large,
           modifier = Modifier.fillMaxWidth(),
         ) {
@@ -348,7 +390,7 @@ fun DashboardScreen(
                 color =
                   if (uiState.settings.realTimeMonitorEnabled)
                     MaterialTheme.colorScheme.secondaryContainer
-                  else MaterialTheme.colorScheme.surfaceVariant,
+                  else MaterialTheme.colorScheme.surfaceContainerHigh,
                 shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.size(44.dp),
               ) {
@@ -366,13 +408,13 @@ fun DashboardScreen(
               Spacer(Modifier.width(12.dp))
               Column(modifier = Modifier.weight(1f)) {
                 Text(
-                  text = "Proteção Automática",
+                  text = "Proteção em Tempo Real",
                   style = MaterialTheme.typography.titleMedium,
                 )
                 Text(
                   text =
                     if (uiState.settings.realTimeMonitorEnabled)
-                      "Verifica novos aplicativos assim que são instalados."
+                      "Verifica novos aplicativos automaticamente ao instalar."
                     else
                       "Ative para proteger seu celular em segundo plano.",
                   style = MaterialTheme.typography.bodySmall,
@@ -387,11 +429,11 @@ fun DashboardScreen(
               )
             }
 
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
             PolicySwitchRow(
-              title = "Avisos na barra de notificações",
-              subtitle = "Receba um alerta na hora se um app suspeito aparecer",
+              title = "Notificações imediatas de ameaças",
+              subtitle = "Mostra alertas na hora com atalhos para Desinstalar ou Bloquear",
               checked = uiState.settings.pushAlertsEnabled,
               onCheckedChange = onTogglePushAlerts,
               testTag = "switch_push_alerts",
@@ -401,7 +443,7 @@ fun DashboardScreen(
               visible = !uiState.notificationPermissionGranted || !uiState.usageAccessGranted
             ) {
               Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 if (!uiState.notificationPermissionGranted) {
                   PermissionPromptRow(
                     icon = Icons.Filled.NotificationsActive,
@@ -428,7 +470,7 @@ fun DashboardScreen(
         }
       }
 
-      // 6. Google Account & Cloud Backup Card
+      // 5. Google Account & Cloud Backup Card
       item(key = "dash_cloud_sync") {
         CloudBackupCard(
           cloudState = cloudSyncState,
@@ -439,11 +481,11 @@ fun DashboardScreen(
         )
       }
 
-      // 7. Collapsible Advanced Settings (Hidden by default for simplicity)
+      // 6. Collapsible Advanced Settings
       item(key = "dash_advanced_settings") {
         Card(
-          colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+          colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
           shape = MaterialTheme.shapes.large,
           modifier = Modifier.fillMaxWidth(),
         ) {
@@ -458,7 +500,7 @@ fun DashboardScreen(
                   .testTag("dashboard_advanced_toggle"),
             ) {
               Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.size(40.dp),
               ) {
@@ -496,7 +538,7 @@ fun DashboardScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
               ) {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                 PolicySwitchRow(
                   title = "Alertar se um app parecer falsificado",
@@ -505,7 +547,7 @@ fun DashboardScreen(
                   onCheckedChange = onToggleSigMismatch,
                   testTag = "policy_sig_mismatch",
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 PolicySwitchRow(
                   title = "Bloquear apps de teste não oficiais",
                   subtitle = "Impede aplicativos feitos com chaves temporárias de desenvolvedor",
@@ -513,7 +555,7 @@ fun DashboardScreen(
                   onCheckedChange = onToggleDebugCerts,
                   testTag = "policy_debug_certs",
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 PolicySwitchRow(
                   title = "Alertar sobre permissões arriscadas",
                   subtitle = "Identifica combinações comuns em golpes (tela + mensagens)",
@@ -521,7 +563,7 @@ fun DashboardScreen(
                   onCheckedChange = onToggleHighRiskPerms,
                   testTag = "policy_high_risk_perms",
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 PolicySwitchRow(
                   title = "Rigidez extra fora da Play Store",
                   subtitle = "Sinaliza aplicativos baixados de sites desconhecidos",
@@ -530,7 +572,7 @@ fun DashboardScreen(
                   testTag = "policy_strict_sideload",
                 )
 
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Spacer(Modifier.height(2.dp))
 
                 OutlinedButton(
@@ -581,6 +623,8 @@ fun DashboardScreen(
 @Composable
 private fun HeroProtectionCard(
   monitorActive: Boolean,
+  serviceRunning: Boolean,
+  verifiedInSession: Int,
   protectionScore: Int,
   blockedCount: Int,
   suspiciousCount: Int,
@@ -589,19 +633,27 @@ private fun HeroProtectionCard(
   onPickApk: () -> Unit,
   onScanNow: () -> Unit,
 ) {
-  val headline =
-    when {
-      blockedCount > 0 -> "$blockedCount app(s) com risco alto"
-      suspiciousCount > 0 -> "$suspiciousCount app(s) merecem atenção"
-      monitorActive -> "Seu celular está protegido"
-      else -> "Proteção automática desligada"
-    }
   val badgeLabel =
     when {
-      blockedCount > 0 -> "Ação necessária"
-      suspiciousCount > 0 -> "Atenção"
-      monitorActive -> "Protegido"
-      else -> "Pausado"
+      blockedCount > 0 -> "Ameaça Detectada"
+      suspiciousCount > 0 -> "Atenção Recomendada"
+      monitorActive -> "Sistema Protegido"
+      else -> "Proteção Pausada"
+    }
+  val headline =
+    when {
+      blockedCount > 0 -> "$blockedCount ameaça(s) bloqueada(s)"
+      suspiciousCount > 0 -> "$suspiciousCount app(s) merecem atenção"
+      monitorActive -> "Nenhuma ameaça ativa"
+      else -> "Escudo em tempo real desligado"
+    }
+  val realTimeSubline =
+    when {
+      !monitorActive -> "Ative a proteção automática abaixo para monitorar instalações."
+      serviceRunning && verifiedInSession > 0 ->
+        "Tempo real ativo • $verifiedInSession verificação(ões) na sessão"
+      serviceRunning -> "Monitoramento em tempo real ativo"
+      else -> "Proteção em tempo real configurada"
     }
   val statusColor =
     when {
@@ -610,12 +662,21 @@ private fun HeroProtectionCard(
       monitorActive -> MaterialTheme.colorScheme.secondary
       else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
+  val badgeContainer =
+    when {
+      blockedCount > 0 -> MaterialTheme.colorScheme.errorContainer
+      suspiciousCount > 0 -> MaterialTheme.colorScheme.tertiaryContainer
+      monitorActive -> MaterialTheme.colorScheme.secondaryContainer
+      else -> MaterialTheme.colorScheme.surfaceContainerHigh
+    }
   val animatedScore by
     animateFloatAsState(
       targetValue = protectionScore / 100f,
       animationSpec = tween(durationMillis = 700),
       label = "hero_protection_score",
     )
+  val bg = MaterialTheme.colorScheme.background
+  val surfaceMid = MaterialTheme.colorScheme.surfaceContainer
 
   Card(
     shape = MaterialTheme.shapes.extraLarge,
@@ -626,8 +687,8 @@ private fun HeroProtectionCard(
           Brush.linearGradient(
             colors =
               listOf(
-                statusColor.copy(alpha = 0.65f),
-                MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
+                statusColor.copy(alpha = 0.7f),
+                MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
               )
           ),
       ),
@@ -647,29 +708,60 @@ private fun HeroProtectionCard(
               Brush.verticalGradient(
                 colors =
                   listOf(
-                    Color(0xD40A1017),
-                    Color(0xEB0E1621),
-                    Color(0xFA0A1017),
+                    bg.copy(alpha = 0.84f),
+                    surfaceMid.copy(alpha = 0.92f),
+                    bg.copy(alpha = 0.97f),
                   )
               )
             )
       )
 
       Column(modifier = Modifier.padding(20.dp)) {
-        Surface(
-          color = statusColor.copy(alpha = 0.16f),
-          contentColor = statusColor,
-          shape = RoundedCornerShape(50),
-          border = BorderStroke(1.dp, statusColor.copy(alpha = 0.4f)),
-          modifier = Modifier.testTag("device_security_status_badge"),
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.SpaceBetween,
+          modifier = Modifier.fillMaxWidth(),
         ) {
-          Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+          Surface(
+            color = badgeContainer.copy(alpha = 0.92f),
+            contentColor = statusColor,
+            shape = RoundedCornerShape(50),
+            border = BorderStroke(1.dp, statusColor.copy(alpha = 0.55f)),
+            modifier = Modifier.testTag("device_security_status_badge"),
           ) {
-            Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(statusColor))
-            Spacer(Modifier.width(6.dp))
-            Text(text = badgeLabel, style = MaterialTheme.typography.labelLarge, color = statusColor)
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+              Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(statusColor))
+              Spacer(Modifier.width(7.dp))
+              Icon(
+                imageVector =
+                  when {
+                    blockedCount > 0 -> Icons.Filled.GppBad
+                    suspiciousCount > 0 -> Icons.Filled.Warning
+                    else -> Icons.Filled.VerifiedUser
+                  },
+                contentDescription = badgeLabel,
+                tint = statusColor,
+                modifier = Modifier.size(16.dp),
+              )
+              Spacer(Modifier.width(6.dp))
+              Text(
+                text = badgeLabel,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = statusColor,
+              )
+            }
+          }
+
+          if (monitorActive) {
+            Text(
+              text = "TEMPO REAL",
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.primary,
+            )
           }
         }
 
@@ -679,14 +771,15 @@ private fun HeroProtectionCard(
           verticalAlignment = Alignment.CenterVertically,
           modifier = Modifier.fillMaxWidth(),
         ) {
-          Box(contentAlignment = Alignment.Center, modifier = Modifier.size(84.dp)) {
+          Box(contentAlignment = Alignment.Center, modifier = Modifier.size(86.dp)) {
+            val arcTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f)
             Canvas(modifier = Modifier.fillMaxSize().padding(4.dp)) {
               val stroke = 7.dp.toPx()
               val d = size.minDimension
               val tl = Offset((size.width - d) / 2f, (size.height - d) / 2f)
               val sz = Size(d, d)
               drawArc(
-                color = Color.White.copy(alpha = 0.14f),
+                color = arcTrackColor,
                 startAngle = 135f,
                 sweepAngle = 270f,
                 useCenter = false,
@@ -709,12 +802,12 @@ private fun HeroProtectionCard(
                 text = "$protectionScore%",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
-                color = Color.White,
+                color = MaterialTheme.colorScheme.onSurface,
               )
               Text(
                 text = "Saúde",
                 style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFFA3B3C6),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
               )
             }
           }
@@ -725,18 +818,22 @@ private fun HeroProtectionCard(
             Text(
               text = headline,
               style = MaterialTheme.typography.headlineSmall,
-              color = Color.White,
+              color = MaterialTheme.colorScheme.onSurface,
             )
             Spacer(Modifier.height(4.dp))
             Text(
-              text =
-                if (lastScanTimestamp > 0L)
-                  "Última verificação: ${formatTimestampPt(lastScanTimestamp)}"
-                else
-                  "Faça sua primeira verificação rápida abaixo.",
+              text = realTimeSubline,
               style = MaterialTheme.typography.bodyMedium,
-              color = Color(0xFFCBD5E1),
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (lastScanTimestamp > 0L) {
+              Spacer(Modifier.height(2.dp))
+              Text(
+                text = "Último scan: ${formatTimestampPt(lastScanTimestamp)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+              )
+            }
           }
         }
 
@@ -776,8 +873,8 @@ private fun HeroProtectionCard(
         OutlinedButton(
           onClick = onPickApk,
           shape = RoundedCornerShape(14.dp),
-          border = BorderStroke(1.dp, Color.White.copy(alpha = 0.25f)),
-          colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+          colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
           modifier = Modifier.fillMaxWidth().height(48.dp).testTag("hero_pick_apk_button"),
         ) {
           Icon(Icons.Filled.FileOpen, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -794,48 +891,67 @@ private fun HeroProtectionCard(
 }
 
 @Composable
-private fun StatusTileCard(
+private fun SummaryMetricCard(
   title: String,
-  count: Int,
+  value: String,
+  subtitle: String,
   icon: ImageVector,
   accent: Color,
+  containerColor: Color,
   onClick: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
   Card(
-    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+    colors = CardDefaults.cardColors(containerColor = containerColor),
+    border = BorderStroke(1.dp, accent.copy(alpha = 0.45f)),
     shape = MaterialTheme.shapes.large,
     modifier = modifier.clickable(role = Role.Button, onClick = onClick),
   ) {
-    Column(
-      horizontalAlignment = Alignment.Start,
-      modifier = Modifier.padding(14.dp),
-    ) {
-      Surface(
-        color = accent.copy(alpha = 0.14f),
-        shape = RoundedCornerShape(10.dp),
-        modifier = Modifier.size(34.dp),
+    Column(modifier = Modifier.padding(16.dp)) {
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier.fillMaxWidth(),
       ) {
-        Box(contentAlignment = Alignment.Center) {
-          Icon(
-            imageVector = icon,
-            contentDescription = title,
-            tint = accent,
-            modifier = Modifier.size(18.dp),
-          )
+        Surface(
+          color = accent.copy(alpha = 0.16f),
+          shape = RoundedCornerShape(12.dp),
+          modifier = Modifier.size(38.dp),
+        ) {
+          Box(contentAlignment = Alignment.Center) {
+            Icon(
+              imageVector = icon,
+              contentDescription = title,
+              tint = accent,
+              modifier = Modifier.size(20.dp),
+            )
+          }
         }
+        Icon(
+          imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+          contentDescription = "Abrir $title",
+          tint = MaterialTheme.colorScheme.onSurfaceVariant,
+          modifier = Modifier.size(18.dp),
+        )
       }
-      Spacer(Modifier.height(10.dp))
+      Spacer(Modifier.height(12.dp))
       Text(
-        text = "$count",
-        style = MaterialTheme.typography.headlineMedium,
+        text = value,
+        style = MaterialTheme.typography.displaySmall,
         color = MaterialTheme.colorScheme.onSurface,
       )
+      Spacer(Modifier.height(2.dp))
       Text(
         text = title,
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.onSurface,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      Text(
+        text = subtitle,
+        style = MaterialTheme.typography.bodySmall,
+        color = accent,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
       )
@@ -844,59 +960,43 @@ private fun StatusTileCard(
 }
 
 @Composable
-private fun ShortcutActionCard(
+private fun CompactCategoryTile(
   title: String,
-  subtitle: String,
+  value: String,
   icon: ImageVector,
   accent: Color,
   onClick: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
   Card(
-    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
-    shape = MaterialTheme.shapes.large,
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    shape = MaterialTheme.shapes.medium,
     modifier = modifier.clickable(role = Role.Button, onClick = onClick),
   ) {
-    Row(
-      verticalAlignment = Alignment.CenterVertically,
-      modifier = Modifier.padding(14.dp),
+    Column(
+      horizontalAlignment = Alignment.Start,
+      modifier = Modifier.padding(12.dp),
     ) {
-      Surface(
-        color = accent.copy(alpha = 0.14f),
-        shape = RoundedCornerShape(12.dp),
-        modifier = Modifier.size(40.dp),
-      ) {
-        Box(contentAlignment = Alignment.Center) {
-          Icon(
-            imageVector = icon,
-            contentDescription = title,
-            tint = accent,
-            modifier = Modifier.size(20.dp),
-          )
-        }
-      }
-      Spacer(Modifier.width(10.dp))
-      Column(modifier = Modifier.weight(1f)) {
-        Text(
-          text = title,
-          style = MaterialTheme.typography.titleSmall,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-          text = subtitle,
-          style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-        )
-      }
       Icon(
-        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-        contentDescription = null,
-        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        imageVector = icon,
+        contentDescription = title,
+        tint = accent,
         modifier = Modifier.size(18.dp),
+      )
+      Spacer(Modifier.height(8.dp))
+      Text(
+        text = value,
+        style = MaterialTheme.typography.titleLarge,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.onSurface,
+      )
+      Text(
+        text = title,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
       )
     }
   }
@@ -982,8 +1082,8 @@ private fun CloudBackupCard(
   onSignOut: () -> Unit,
 ) {
   Card(
-    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     shape = MaterialTheme.shapes.large,
     modifier = Modifier.fillMaxWidth().testTag("cloud_sync_card"),
   ) {
@@ -1042,7 +1142,7 @@ private fun CloudBackupCard(
 
       if (!cloudState.errorMessage.isNullOrBlank()) {
         Surface(
-          color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f),
+          color = MaterialTheme.colorScheme.errorContainer,
           shape = RoundedCornerShape(10.dp),
           modifier = Modifier.fillMaxWidth(),
         ) {
@@ -1055,7 +1155,7 @@ private fun CloudBackupCard(
         }
       } else if (!cloudState.statusMessage.isNullOrBlank()) {
         Surface(
-          color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
+          color = MaterialTheme.colorScheme.secondaryContainer,
           shape = RoundedCornerShape(10.dp),
           modifier = Modifier.fillMaxWidth(),
         ) {
@@ -1100,6 +1200,352 @@ private fun CloudBackupCard(
           Spacer(Modifier.width(6.dp))
           Text("Restaurar", maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+      }
+    }
+  }
+}
+
+@Composable
+private fun DeepDetectionOverviewCard(
+  playStoreFlaggedCount: Int,
+  externalFlaggedCount: Int,
+  permissionAbuseCount: Int,
+  accessibilityRiskCount: Int,
+  hiddenCommCount: Int,
+  catalogEntriesCount: Int,
+  onFilterPlayStoreAlerts: () -> Unit,
+  onFilterExternal: () -> Unit,
+  onFilterAccessibility: () -> Unit,
+  onFilterHiddenComm: () -> Unit,
+  onOpenThreatCatalog: () -> Unit,
+) {
+  Card(
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    shape = MaterialTheme.shapes.large,
+    modifier = Modifier.fillMaxWidth().testTag("dashboard_deep_detection_card"),
+  ) {
+    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier.fillMaxWidth(),
+      ) {
+        Column(modifier = Modifier.weight(1f)) {
+          Text(
+            text = "Detecção Profunda e Origem",
+            style = MaterialTheme.typography.titleMedium,
+          )
+          Text(
+            text = "Diferencia alertas da Play Store de ameaças externas",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
+        TextButton(
+          onClick = onOpenThreatCatalog,
+          modifier = Modifier.testTag("dashboard_open_threat_catalog_btn"),
+        ) {
+          Text("Banco ($catalogEntriesCount)")
+        }
+      }
+
+      Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+      ) {
+        Surface(
+          color = MaterialTheme.colorScheme.surfaceContainerHigh,
+          shape = RoundedCornerShape(12.dp),
+          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+          modifier =
+            Modifier.weight(1f)
+              .clickable(onClick = onFilterPlayStoreAlerts)
+              .testTag("dashboard_playstore_alerts_tile"),
+        ) {
+          Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+              text = "$playStoreFlaggedCount",
+              style = MaterialTheme.typography.titleLarge,
+              fontWeight = FontWeight.Bold,
+              color =
+                if (playStoreFlaggedCount > 0) MaterialTheme.colorScheme.tertiary
+                else MaterialTheme.colorScheme.secondary,
+            )
+            Text(
+              text = "Da Play Store c/ alerta",
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+          }
+        }
+        Surface(
+          color = MaterialTheme.colorScheme.surfaceContainerHigh,
+          shape = RoundedCornerShape(12.dp),
+          border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+          modifier =
+            Modifier.weight(1f)
+              .clickable(onClick = onFilterExternal)
+              .testTag("dashboard_external_alerts_tile"),
+        ) {
+          Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+              text = "$externalFlaggedCount",
+              style = MaterialTheme.typography.titleLarge,
+              fontWeight = FontWeight.Bold,
+              color =
+                if (externalFlaggedCount > 0) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.secondary,
+            )
+            Text(
+              text = "Fora da Play Store",
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+          }
+        }
+      }
+
+      Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+      ) {
+        CompactCategoryTile(
+          title = "Permissões",
+          value = "$permissionAbuseCount",
+          icon = Icons.Filled.Warning,
+          accent =
+            if (permissionAbuseCount > 0) MaterialTheme.colorScheme.tertiary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+          onClick = onFilterPlayStoreAlerts,
+          modifier = Modifier.weight(1f).testTag("dashboard_perm_abuse_tile"),
+        )
+        CompactCategoryTile(
+          title = "Acessibilidade",
+          value = "$accessibilityRiskCount",
+          icon = Icons.Filled.AdminPanelSettings,
+          accent =
+            if (accessibilityRiskCount > 0) MaterialTheme.colorScheme.error
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+          onClick = onFilterAccessibility,
+          modifier = Modifier.weight(1f).testTag("dashboard_accessibility_tile"),
+        )
+        CompactCategoryTile(
+          title = "Envio Oculto",
+          value = "$hiddenCommCount",
+          icon = Icons.Filled.Radar,
+          accent =
+            if (hiddenCommCount > 0) MaterialTheme.colorScheme.error
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+          onClick = onFilterHiddenComm,
+          modifier = Modifier.weight(1f).testTag("dashboard_hidden_comm_tile"),
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun AntivirusUpdatesCard(
+  catalogCount: Int,
+  isUpdating: Boolean,
+  autoUpdateEnabled: Boolean,
+  lastUpdateAt: Long,
+  versionLabel: String,
+  statusMessage: String,
+  sourceLabel: String,
+  providerVerified: Boolean,
+  hadError: Boolean,
+  onToggleAutoUpdate: (Boolean) -> Unit,
+  onManualUpdate: () -> Unit,
+  onOpenThreatCatalog: () -> Unit,
+) {
+  val statusBadgeText =
+    when {
+      isUpdating -> "Atualizando..."
+      hadError -> "Erro de rede"
+      lastUpdateAt > 0L -> "Atualizado"
+      else -> "Pronto"
+    }
+  val statusTint =
+    when {
+      isUpdating -> MaterialTheme.colorScheme.primary
+      hadError -> MaterialTheme.colorScheme.error
+      lastUpdateAt > 0L -> MaterialTheme.colorScheme.secondary
+      else -> MaterialTheme.colorScheme.primary
+    }
+  val statusBg =
+    when {
+      isUpdating -> MaterialTheme.colorScheme.primaryContainer
+      hadError -> MaterialTheme.colorScheme.errorContainer
+      lastUpdateAt > 0L -> MaterialTheme.colorScheme.secondaryContainer
+      else -> MaterialTheme.colorScheme.surfaceContainerHigh
+    }
+
+  Card(
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    shape = MaterialTheme.shapes.large,
+    modifier = Modifier.fillMaxWidth().testTag("dashboard_antivirus_update_card"),
+  ) {
+    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier.fillMaxWidth(),
+      ) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+          Surface(
+            color = statusBg,
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier.size(44.dp),
+          ) {
+            Box(contentAlignment = Alignment.Center) {
+              Icon(
+                imageVector = Icons.Filled.CloudSync,
+                contentDescription = "Atualizações do antivírus",
+                tint = statusTint,
+              )
+            }
+          }
+          Spacer(Modifier.width(12.dp))
+          Column {
+            Text(
+              text = "Atualizações do Antivírus",
+              style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+              text = sourceLabel,
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+          }
+        }
+        Spacer(Modifier.width(8.dp))
+        Surface(
+          color = statusBg,
+          shape = RoundedCornerShape(50),
+          border = BorderStroke(1.dp, statusTint.copy(alpha = 0.5f)),
+        ) {
+          Text(
+            text = statusBadgeText,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+            color = statusTint,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+          )
+        }
+      }
+
+      Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth(),
+      ) {
+        Column(
+          modifier = Modifier.padding(12.dp),
+          verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Text(
+              text = "$catalogCount definições • $versionLabel",
+              style = MaterialTheme.typography.labelLarge,
+              color = MaterialTheme.colorScheme.onSurface,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.weight(1f),
+            )
+            TextButton(
+              onClick = onOpenThreatCatalog,
+              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+            ) {
+              Text("Ver base")
+            }
+          }
+          Text(
+            text =
+              if (lastUpdateAt > 0L) {
+                "Última sincronização: ${formatTimestampPt(lastUpdateAt)}"
+              } else {
+                "Nenhuma sincronização online realizada ainda."
+              },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+          )
+          Text(
+            text = statusMessage,
+            style = MaterialTheme.typography.bodySmall,
+            color =
+              if (hadError) MaterialTheme.colorScheme.error
+              else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+          )
+          if (providerVerified) {
+            Text(
+              text = "Segurança TLS Google Play Services verificada",
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.secondary,
+            )
+          }
+        }
+      }
+
+      HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+      PolicySwitchRow(
+        title = "Atualização recorrente automática",
+        subtitle = "Busca novas definições no servidor do Google a cada 12h",
+        checked = autoUpdateEnabled,
+        onCheckedChange = onToggleAutoUpdate,
+        testTag = "switch_auto_antivirus_update",
+      )
+
+      Button(
+        onClick = onManualUpdate,
+        enabled = !isUpdating,
+        shape = RoundedCornerShape(14.dp),
+        colors =
+          ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.secondary,
+            contentColor = MaterialTheme.colorScheme.onSecondary,
+          ),
+        modifier =
+          Modifier.fillMaxWidth().height(48.dp).testTag("dashboard_manual_update_button"),
+      ) {
+        if (isUpdating) {
+          CircularProgressIndicator(
+            strokeWidth = 2.dp,
+            color = MaterialTheme.colorScheme.onSecondary,
+            modifier = Modifier.size(18.dp),
+          )
+        } else {
+          Icon(
+            imageVector = Icons.Filled.Refresh,
+            contentDescription = "Atualizar base do antivírus",
+            modifier = Modifier.size(18.dp),
+          )
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(
+          text =
+            if (isUpdating) "Atualizando do servidor Google..."
+            else "Atualizar Antivírus Agora",
+          style = MaterialTheme.typography.titleSmall,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
       }
     }
   }
